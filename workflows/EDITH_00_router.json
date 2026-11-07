@@ -1,0 +1,740 @@
+{
+  "name": "EDITH_00_router",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ],
+        "additionalFields": {}
+      },
+      "id": "telegram-trigger-001",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        180,
+        400
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Router Classifier\n * Classifies incoming Telegram updates into discrete execution routes.\n */\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const json = item.json;\n\n  // 1. Check for Callback Query (Inline keyboard buttons)\n  if (json.callback_query) {\n    const cb = json.callback_query;\n    results.push({\n      json: {\n        route: 'callback',\n        update_id: json.update_id,\n        chat_id: cb.message?.chat?.id || cb.from?.id,\n        message_id: cb.message?.message_id,\n        callback_query_id: cb.id,\n        callback_data: cb.data || '',\n        from_id: cb.from?.id,\n        from_username: cb.from?.username || '',\n        from_name: [cb.from?.first_name, cb.from?.last_name].filter(Boolean).join(' '),\n        from: {\n          id: cb.from?.id,\n          username: cb.from?.username || '',\n          name: [cb.from?.first_name, cb.from?.last_name].filter(Boolean).join(' ')\n        }\n      }\n    });\n    continue;\n  }\n\n  // Extract standard message\n  const msg = json.message || json.channel_post || json.edited_message;\n  if (!msg) {\n    results.push({\n      json: {\n        route: 'fallback',\n        update_id: json.update_id,\n        reason: 'no_message_found'\n      }\n    });\n    continue;\n  }\n\n  const chatId = msg.chat?.id;\n  const messageId = msg.message_id;\n  const text = (msg.text || msg.caption || '').trim();\n  const from = msg.from || {};\n  const fromUser = {\n    id: from.id,\n    username: from.username || '',\n    name: [from.first_name, from.last_name].filter(Boolean).join(' ')\n  };\n  const messageDate = msg.date || Math.floor(Date.now() / 1000);\n\n  // 2. Check for Reply to Bot (Clarification responses)\n  if (msg.reply_to_message && msg.reply_to_message.from && msg.reply_to_message.from.is_bot) {\n    results.push({\n      json: {\n        route: 'reply',\n        chat_id: chatId,\n        message_id: messageId,\n        message_date: messageDate,\n        reply_to_message_id: msg.reply_to_message.message_id,\n        reply_to_text: msg.reply_to_message.text || '',\n        text: text,\n        from: fromUser\n      }\n    });\n    continue;\n  }\n\n  // 3. Check for .txt document upload\n  if (msg.document) {\n    const doc = msg.document;\n    const isTxt = doc.mime_type === 'text/plain' || (doc.file_name && doc.file_name.toLowerCase().endsWith('.txt'));\n    results.push({\n      json: {\n        route: 'doc_txt',\n        chat_id: chatId,\n        message_id: messageId,\n        message_date: messageDate,\n        file_id: doc.file_id,\n        file_name: doc.file_name || (isTxt ? 'transcript.txt' : 'file'),\n        file_size: doc.file_size || 0,\n        mime_type: doc.mime_type || (isTxt ? 'text/plain' : 'application/octet-stream'),\n        caption: text,\n        from: fromUser\n      }\n    });\n    continue;\n  }\n\n  // 4. Check for recognized slash commands\n  const commandMatch = text.match(/^\\/(start|help|register|tasks|update|done|assign|deadline|ask)(?:@\\w+)?(?:\\s+([\\s\\S]*))?$/i);\n  if (commandMatch) {\n    const command = commandMatch[1].toLowerCase();\n    const args = (commandMatch[2] || '').trim();\n    results.push({\n      json: {\n        route: 'command',\n        chat_id: chatId,\n        message_id: messageId,\n        message_date: messageDate,\n        command: command,\n        command_args: args,\n        raw_text: text,\n        from: fromUser\n      }\n    });\n    continue;\n  }\n\n  // 5. Check for transcript text (>300 chars or /upload_meeting)\n  if (text.startsWith('/upload_meeting') || text.length > 300) {\n    const cleanText = text.replace(/^\\/upload_meeting(?:@\\w+)?\\s*/i, '').trim();\n    results.push({\n      json: {\n        route: 'transcript_text',\n        chat_id: chatId,\n        message_id: messageId,\n        message_date: messageDate,\n        text: cleanText,\n        text_length: cleanText.length,\n        from: fromUser\n      }\n    });\n    continue;\n  }\n\n  // 5b. Check for non-command questions in private chat (route to NL query)\n  const isPrivateChat = typeof chatId === 'number' ? chatId > 0 : !String(chatId).startsWith('-');\n  if (isPrivateChat && (text.endsWith('?') || /^(what|which|who|where|when|why|how|is|are|can|show)\\b/i.test(text))) {\n    results.push({\n      json: {\n        route: 'command',\n        chat_id: chatId,\n        message_id: messageId,\n        message_date: messageDate,\n        command: 'ask',\n        command_args: text,\n        raw_text: text,\n        from: fromUser\n      }\n    });\n    continue;\n  }\n\n  // 6. Fallback route for all other inputs\n  results.push({\n    json: {\n      route: 'fallback',\n      chat_id: chatId,\n      message_id: messageId,\n      message_date: messageDate,\n      text: text,\n      from: fromUser\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "code-classifier-002",
+      "name": "Classify Incoming Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "command",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "doc_txt",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "transcript_text",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "callback",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "reply",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": 5
+        }
+      },
+      "id": "switch-routes-003",
+      "name": "Switch Routes",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        640,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.command }}",
+                    "rightValue": "start",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.command }}",
+                    "rightValue": "help",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ ['tasks', 'update', 'done', 'assign', 'deadline'].includes($json.command) }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.command }}",
+                    "rightValue": "register",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.command }}",
+                    "rightValue": "ask",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": 5
+        }
+      },
+      "id": "switch-commands-004",
+      "name": "Switch Commands",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        920,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "EDITH online. Send me a meeting transcript or upload a .txt file, and I'll turn it into actionable tasks.\n\nCore Capabilities:\n• Extract structured action items, owners, and deadlines\n• Zero-hallucination tracking (unknown = flagged)\n• Real-time sync with Google Sheets\n• Executive summaries posted to your team group\n• Automated follow-ups on pending tasks\n\nCommands:\n/start - Display operational status\n/help - Detailed command & formatting guide\n/tasks - View active and overdue action items\n/register - Register your Telegram handle\n/update <task_id> <status> - Update task status\n/ask <query> - Query meeting decisions and tasks",
+        "additionalFields": {}
+      },
+      "id": "tg-send-start-005",
+      "name": "Send Start Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1200,
+        20
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "EDITH Command & Submission Guide\n\nHow to submit a meeting:\n1. Upload a plain .txt export file from Google Meet or Zoom.\n2. Or paste transcript text (over 300 characters) directly.\n3. Or send /upload_meeting followed by transcript text.\n\nCommands:\n/start - Show bot status\n/help - View this guide\n/tasks - List active and overdue action items\n/register - Link your Telegram ID to team database\n/update <task_id> <status> - Update task (e.g. /update TSK-1001 completed)\n/ask <query> - Ask questions about meetings or decisions",
+        "additionalFields": {}
+      },
+      "id": "tg-send-help-006",
+      "name": "Send Help Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1200,
+        120
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "workflowId": "EDITH_02_clarification_and_updates",
+        "options": {}
+      },
+      "id": "exec-proc-updates-cmd-007",
+      "name": "Execute EDITH_02_updates (Command)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "=Route A (Command) reached: /{{ $json.command }}\nArguments: {{ $json.command_args || 'None' }}",
+        "additionalFields": {}
+      },
+      "id": "tg-send-other-cmd-008",
+      "name": "Send Other Command Ack",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1200,
+        320
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "workflowId": "EDITH_01_process_transcript",
+        "options": {}
+      },
+      "id": "exec-proc-doc-009",
+      "name": "Process Transcript (.txt File)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [
+        920,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": "EDITH_01_process_transcript",
+        "options": {}
+      },
+      "id": "exec-proc-text-010",
+      "name": "Process Transcript (Pasted Text)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [
+        920,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "callback",
+        "operation": "answerQuery",
+        "queryId": "={{ $json.callback_query_id }}",
+        "additionalFields": {}
+      },
+      "id": "tg-ans-callback-011",
+      "name": "Answer Callback Query",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        920,
+        540
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "workflowId": "EDITH_02_clarification_and_updates",
+        "options": {}
+      },
+      "id": "exec-proc-updates-cb-012",
+      "name": "Execute EDITH_02_updates (Callback)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [
+        1140,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": "EDITH_02_clarification_and_updates",
+        "options": {}
+      },
+      "id": "exec-proc-updates-reply-013",
+      "name": "Execute EDITH_02_updates (Reply)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [
+        920,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "⚠️ EDITH could not understand that.\n\nSend a meeting transcript, upload a .txt file, or type /help to view available commands.",
+        "additionalFields": {}
+      },
+      "id": "tg-send-route-f-014",
+      "name": "Send Route F Fallback",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        920,
+        780
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Members",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "gsheets-read-members-reg-015",
+      "name": "Read Members Tab (Register)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        760,
+        420
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Member Registration (code-nodes/register_member.js)\n * \n * Handles /register <your name>:\n * - Extracts sender's name, telegram_username, telegram_id, and chat_id\n * - Upserts in Members Google Sheets tab\n * - Emits confirmation: \"Registered. EDITH will now send your reminders directly.\"\n */\n\nfunction processRegisterMember(items, existingMembers = []) {\n  const results = [];\n\n  for (const item of items) {\n    const json = item.json;\n\n    const fromUser = json.from || {};\n    const chatId = String(json.chat_id || fromUser.id || '');\n    const telegramId = String(fromUser.id || '');\n    const telegramUsername = (fromUser.username || '').replace(/^@/, '');\n    const fallbackName = [fromUser.first_name, fromUser.last_name].filter(Boolean).join(' ') || telegramUsername || 'Team Member';\n\n    // Extract name from command args: /register <your name>\n    const text = (json.text || json.raw_text || '').trim();\n    const commandArgs = (json.command_args || text.replace(/^\\/register(?:@\\w+)?\\s*/i, '')).trim();\n    const registeredName = commandArgs || fallbackName;\n\n    // Check if member already exists in Members tab (match by telegram_id or case-insensitive name)\n    const existing = existingMembers.find(m => \n      (m.telegram_id && String(m.telegram_id) === telegramId) ||\n      (m.name && m.name.trim().toLowerCase() === registeredName.toLowerCase())\n    );\n\n    const memberRecord = {\n      name: registeredName,\n      telegram_username: telegramUsername,\n      telegram_id: telegramId,\n      chat_id: chatId\n    };\n\n    results.push({\n      json: {\n        chat_id: chatId,\n        is_update: Boolean(existing),\n        member_record: memberRecord,\n        reply_message: 'Registered. EDITH will now send your reminders directly.'\n      }\n    });\n  }\n\n  return results;\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = {\n    processRegisterMember\n  };\n}\n\nif (typeof $input !== 'undefined') {\n  let membersList = [];\n  try {\n    if (typeof $ !== 'undefined') {\n      membersList = $('Read Members Tab').all().map(i => i.json);\n    }\n  } catch (e) {\n    membersList = [];\n  }\n\n  return processRegisterMember($input.all(), membersList);\n}\n"
+      },
+      "id": "code-register-member-016",
+      "name": "Register Member",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        980,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Members",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": [
+            "telegram_id"
+          ],
+          "value": {
+            "name": "={{ $json.member_record.name }}",
+            "telegram_username": "={{ $json.member_record.telegram_username }}",
+            "telegram_id": "={{ $json.member_record.telegram_id }}",
+            "chat_id": "={{ $json.member_record.chat_id }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "gsheets-upsert-member-017",
+      "name": "Upsert Members Tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1200,
+        420
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.reply_message }}"
+      },
+      "id": "tg-send-registered-ack-018",
+      "name": "Send Registered Confirmation",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1420,
+        420
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "workflowId": "EDITH_04_nl_query",
+        "options": {}
+      },
+      "id": "exec-proc-nlq-019",
+      "name": "Execute EDITH_04_nl_query",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        420
+      ]
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Classify Incoming Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Incoming Update": {
+      "main": [
+        [
+          {
+            "node": "Switch Routes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch Routes": {
+      "main": [
+        [
+          {
+            "node": "Switch Commands",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Process Transcript (.txt File)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Process Transcript (Pasted Text)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Answer Callback Query",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute EDITH_02_updates (Reply)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Route F Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch Commands": {
+      "main": [
+        [
+          {
+            "node": "Send Start Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Help Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute EDITH_02_updates (Command)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read Members Tab (Register)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute EDITH_04_nl_query",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Other Command Ack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Callback Query": {
+      "main": [
+        [
+          {
+            "node": "Execute EDITH_02_updates (Callback)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Members Tab (Register)": {
+      "main": [
+        [
+          {
+            "node": "Register Member",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Register Member": {
+      "main": [
+        [
+          {
+            "node": "Upsert Members Tab",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Members Tab": {
+      "main": [
+        [
+          {
+            "node": "Send Registered Confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "EDITH_99_error_handler"
+  }
+}

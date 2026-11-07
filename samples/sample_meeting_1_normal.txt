@@ -1,0 +1,15 @@
+Meeting: Sprint 4 Architecture & Backend Sync
+Date: 2026-11-09
+Time: 10:00 AM IST
+Attendees: Dwipayan, Alex, Sarah
+
+[00:00:15] Dwipayan: Alright everyone, let's get started. We have two key agenda items today: migrating our authentication service to JWT rotation and resolving the staging database query latency issues.
+[00:01:02] Alex: On the auth service, I reviewed the PR yesterday. The token rotation logic looks clean, but we need middleware to intercept expired access tokens and issue fresh ones seamlessly.
+[00:01:45] Dwipayan: Agreed. I will finalize the JWT middleware and push the PR by this Friday, November 13th.
+[00:02:10] Sarah: Perfect. What about the database latency on staging? We noticed a 400ms spike during load tests last Thursday.
+[00:02:50] Alex: That's because the foreign key index on the transactions table was missing after the last migration. I can run the database index audit and deploy the missing indexes by Sunday, November 15th.
+[00:03:30] Sarah: Great. Once Alex completes the index migration, I will re-run the staging load tests by Monday, November 16th.
+[00:04:15] Dwipayan: Let's also make a formal decision on the search index rewrite. Should we push it to Sprint 5?
+[00:04:30] Alex: Yes, let's officially postpone the search index rewrite to Sprint 5 so we don't risk the upcoming demo.
+[00:04:45] Sarah: Agreed. Decision finalized.
+[00:05:00] Dwipayan: Sounds good. Let's wrap up and get to work. Thanks team!

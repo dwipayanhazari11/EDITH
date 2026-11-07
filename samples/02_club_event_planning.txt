@@ -1,0 +1,16 @@
+Meeting: Annual TechFest 2026 Core Committee Planning
+Date: 2026-11-10
+
+Aarav: Welcome team leads. Today we need to lock down the master roadmap for TechFest 2026. First decision: the official event date is locked for December 5, 2026.
+Tanya: Confirmed. The date works well with academic schedules.
+Vikram: Regarding corporate sponsorship, our target is 3 Lakhs INR. I will draft the sponsorship tier brochure and email it to our top 20 potential tech sponsors by 2026-11-20.
+Aarav: Perfect, Vikram. That gives sponsors enough lead time.
+Ananya: For promotions, our social media team is ready. I will launch our official teaser campaign on Instagram and LinkedIn by 2026-11-18.
+Neha: I've started the branding kit. The color palette and logo variations are almost complete.
+Aarav: Neha, can you design the attendee digital badges and speaker certificate templates by 2026-11-22?
+Neha: Yes, I will deliver the digital badge templates and speaker certificates by November 22.
+Tanya: On the engineering side, we need the landing page live. I will build and deploy the registration portal on Cloudflare Pages by 2026-11-25.
+Siddharth: For the venue, we have submitted the auditorium requisition letter to the Dean, but we haven't received official written approval yet.
+Aarav: That's a critical open item. Siddharth, please follow up in person tomorrow.
+Rohan: I will open the student volunteer recruitment Google Form by 2026-11-15 and shortlist 30 event coordinators.
+Aarav: Excellent work everyone. Let's reconvene next Tuesday.

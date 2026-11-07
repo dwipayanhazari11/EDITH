@@ -1,0 +1,13 @@
+Meeting: Post-Midterm Sprint Retrospective & Backlog Grooming
+Date: 2026-11-08
+
+Rohan: Let's catch up on the technical debt items from our backlog. Everyone was busy with exams last week.
+Kavita: Yes, glad midterms are finally over. What should we tackle first?
+Rohan: I will handle the PostgreSQL database index optimization and table migration soon.
+Kavita: How soon is that, Rohan?
+Rohan: Just give me a few days, I'll push it soon once my local environment is set up.
+Aman: What about our frontend payment gateway integration? Stripe requires webhook secret verification.
+Kavita: I can look into the Stripe webhook verification sometime next week, definitely after our lab exams wrap up.
+Aman: Okay, sounds good. Also, our Tailwind CSS build size is ballooning. I will refactor the unused utility classes around the end of the month maybe.
+Rohan: Do we have a fixed date for the staging release?
+Aman: Not yet, let's wait until we finish these backlog items. Meeting closed.

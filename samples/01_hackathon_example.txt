@@ -1,0 +1,14 @@
+Meeting: Hackathon Project Kickoff & Task Allocation
+Date: 2026-11-09
+
+Dwipayan: Welcome everyone. We have 4 days until the submission deadline. Let's align on core deliverables for our AI meeting assistant project.
+Rahul: I've already tested the Gemini 3.8 Flash model via API. I will finish the prompt engineering and JSON response schema by Wednesday, 2026-11-11.
+Priya: Great. I will build the Telegram bot router and sub-workflows in n8n. I'll have the complete routing logic ready by Thursday, 2026-11-12.
+Dwipayan: Excellent commitments. We decided that we will strictly use Google Sheets for the database persistence to keep setup simple for student teams.
+Rahul: Agreed. We also confirmed we will use Cloudflare Tunnels for webhook ingress.
+Dwipayan: What about the architecture documentation and final slide deck?
+Priya: Someone definitely needs to write the project documentation and setup guide. It is essential for the judges.
+Dwipayan: Let's log that as an action item. Who wants to take ownership of the documentation?
+Rahul: We can decide on that later or in our next check-in.
+Priya: Let's also make sure we test deduplication so re-submitting the same transcript doesn't create duplicate tasks.
+Dwipayan: Agreed. Meeting adjourned.

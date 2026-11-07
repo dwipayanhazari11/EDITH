@@ -1,0 +1,25 @@
+10:30:05
+(Dwipayan Adhikary)
+Meeting: Google Meet Architecture Review
+Date: 2026-11-09
+Welcome team to our weekly engineering call. Let's review deliverables.
+
+10:30:42
+(Rahul Sharma)
+I will complete the Docker container configuration and environment provisioning by 2026-11-12.
+
+10:31:18
+(Priya Patel)
+Awesome Rahul. I will configure the n8n Telegram webhook routes and credential bindings by 2026-11-13.
+
+10:32:04
+(Dwipayan Adhikary)
+We decided that self-hosting on Docker is our production standard.
+
+10:32:35
+(Rahul Sharma)
+Confirmed. That keeps operational costs zero for student projects.
+
+10:33:10
+(Priya Patel)
+Agreed. Everything looks solid for this week.

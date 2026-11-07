@@ -1,0 +1,5 @@
+task_id,meeting_id,task,owner,owner_telegram_id,deadline,deadline_phrase,status,source_quote,last_reminder_stage,created_at,updated_at
+TSK-1001,MTG-7A9B1C2D,Finalize JWT middleware,Dwipayan,@dwipayan_dev,2026-11-13,by this Friday,assigned,"Dwipayan: I'll finalize the JWT middleware by this Friday.",0,2026-11-06 23:30:00,2026-11-06 23:30:00
+TSK-1002,MTG-7A9B1C2D,Run database index audit,Alex,@alex_tech,2026-11-15,by Sunday,assigned,"Alex: I can run the index audit by Sunday.",0,2026-11-06 23:30:00,2026-11-06 23:30:00
+TSK-1003,MTG-7A9B1C2D,Draft load testing plan,Sarah,@sarah_qa,,sometime next week,ambiguous_deadline,"Sarah: I will draft the load testing plan sometime next week.",0,2026-11-06 23:30:00,2026-11-06 23:30:00
+TSK-1004,MTG-7A9B1C2D,Configure staging SSL certificates,,,,unassigned,"We still need someone to configure the staging SSL certificates.",0,2026-11-06 23:30:00,2026-11-06 23:30:00

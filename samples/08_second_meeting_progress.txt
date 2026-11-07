@@ -1,0 +1,8 @@
+Meeting: Hackathon Standup & Backend Kickoff
+Date: 2026-11-12
+
+Rahul: Good morning team. Quick update from my side: the frontend is done. We wrapped up all responsive screens and styling yesterday.
+Priya: Fantastic work Rahul. Now that frontend is finished, can you integrate the Stripe payment API by Friday?
+Rahul: Yes, I will integrate the Stripe payment API by this Friday, November 13.
+Priya: Great. I will write the deployment documentation by Saturday, November 14.
+Rahul: Sounds good. Let's make sure we test webhook handling as well.

@@ -1,0 +1,7 @@
+key,value
+default_timezone,Asia/Kolkata
+group_chat_id,-1001234567890
+reminder_hour,09:00
+staged_reminders_enabled,true
+deduplication_window_days,30
+bot_name,EDITH

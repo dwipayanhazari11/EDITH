@@ -1,0 +1,347 @@
+{
+  "name": "EDITH_03_reminders",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger-001",
+      "name": "Daily 09:00 AM IST Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Config",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "gsheets-read-config-002",
+      "name": "Read Config Tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        320,
+        200
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Members",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "gsheets-read-members-002b",
+      "name": "Read Members Tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        320,
+        380
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "ActionItems",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "gsheets-read-tasks-003",
+      "name": "Read ActionItems Tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        540,
+        300
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Staged Reminder Engine (code-nodes/evaluate_staged_reminders.js)\n * \n * Rules:\n * 1. Reads ActionItems where status !== 'completed' and deadline is set.\n * 2. Computes stage in Asia/Kolkata:\n *    - Stage 1: T-2 days (deadline === today + 2)\n *    - Stage 2: T-1 day (deadline === today + 1 / tomorrow)\n *    - Stage 3: Due today (deadline === today)\n *    - Stage 4: Overdue (deadline < today)\n * 3. Skips if last_reminder_stage >= current_stage (prevents duplicate spam).\n * 4. Generates personal reminder:\n *    \"{Owner}, your \\\"{task}\\\" deadline is {time}. Current progress?\"\n *    Buttons: \"Done\", \"In progress\", \"Need more time\"\n *    callback_data: rem|<task_id>|<value> (< 64 bytes)\n * 5. Routing:\n *    - DM member.chat_id if registered in Members\n *    - Otherwise @mention in group_chat_id\n * 6. Escalates last_reminder_stage and sets status=\"overdue\" if past due.\n */\n\nfunction formatDateIst(ms) {\n  const d = new Date(ms + 330 * 60 * 1000);\n  return d.toISOString().slice(0, 10);\n}\n\nfunction processStagedReminders(items, customTasks = null, customMembers = null, customConfig = null, customNowMs = null) {\n  const results = [];\n\n  const baseMs = customNowMs !== null ? customNowMs : Date.now();\n  const todayStr = formatDateIst(baseMs);\n  const tMinus1Str = formatDateIst(baseMs + 24 * 60 * 60 * 1000); // tomorrow\n  const tMinus2Str = formatDateIst(baseMs + 48 * 60 * 60 * 1000); // in 2 days\n  const nowIso = new Date(baseMs + 330 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19);\n\n  // 1. Resolve Config\n  let configMap = {};\n  if (customConfig) {\n    configMap = customConfig;\n  } else {\n    try {\n      if (typeof $ !== 'undefined') {\n        const rows = $('Read Config Tab').all().map(i => i.json);\n        rows.forEach(r => { if (r.key) configMap[r.key] = String(r.value || '').trim(); });\n      }\n    } catch (e) {}\n  }\n\n  const remindersEnabled = configMap.staged_reminders_enabled !== 'false';\n  const groupChatId = configMap.group_chat_id || (typeof process !== 'undefined' ? (process.env.TELEGRAM_GROUP_CHAT_ID || process.env.TELEGRAM_ADMIN_CHAT_ID) : null);\n\n  if (!remindersEnabled) {\n    results.push({ json: { has_reminders: false, reason: 'reminders_disabled' } });\n    return results;\n  }\n\n  // 2. Resolve Members\n  let membersList = customMembers;\n  if (!membersList) {\n    try {\n      if (typeof $ !== 'undefined') {\n        membersList = $('Read Members Tab').all().map(i => i.json);\n      }\n    } catch (e) {\n      membersList = [];\n    }\n  }\n  membersList = membersList || [];\n\n  // 3. Resolve Tasks\n  let allTasks = customTasks;\n  if (!allTasks) {\n    try {\n      if (typeof $ !== 'undefined') {\n        allTasks = $('Read ActionItems Tab').all().map(i => i.json);\n      }\n    } catch (e) {\n      allTasks = [];\n    }\n  }\n  allTasks = allTasks || [];\n\n  const reminderMessages = [];\n  const tasksToUpdate = [];\n\n  for (const task of allTasks) {\n    const status = (task.status || '').toLowerCase().trim();\n    if (status === 'completed') continue;\n\n    const deadline = (task.deadline || '').trim();\n    if (!deadline || !/^\\d{4}-\\d{2}-\\d{2}$/.test(deadline)) continue;\n\n    const lastStage = parseInt(task.last_reminder_stage, 10) || 0;\n    let currentStage = 0;\n    let timePhrase = '';\n\n    if (deadline < todayStr) {\n      currentStage = 4; // Overdue\n      timePhrase = 'past due';\n    } else if (deadline === todayStr) {\n      currentStage = 3; // Due today\n      timePhrase = 'today';\n    } else if (deadline === tMinus1Str) {\n      currentStage = 2; // T-1 day (tomorrow)\n      timePhrase = 'tomorrow';\n    } else if (deadline === tMinus2Str) {\n      currentStage = 1; // T-2 days\n      timePhrase = 'in 2 days';\n    }\n\n    // Skip if not in a reminder window or already reminded for this stage (anti-spam)\n    if (currentStage === 0 || lastStage >= currentStage) {\n      continue;\n    }\n\n    // Lookup Member registration\n    const taskOwner = (task.owner || '').trim();\n    const taskOwnerTg = (task.owner_telegram_id || '').replace(/^@/, '').trim().toLowerCase();\n\n    let matchedMember = membersList.find(m => \n      (taskOwnerTg && (m.telegram_username || '').replace(/^@/, '').trim().toLowerCase() === taskOwnerTg) ||\n      (taskOwner && (m.name || '').trim().toLowerCase() === taskOwner.toLowerCase()) ||\n      (taskOwner && (m.name || '').trim().split(' ')[0].toLowerCase() === taskOwner.split(' ')[0].toLowerCase())\n    );\n\n    const ownerName = matchedMember?.name || task.owner || 'Team member';\n    const hasDmChat = matchedMember?.chat_id && !String(matchedMember.chat_id).startsWith('-');\n    const targetChatId = hasDmChat ? String(matchedMember.chat_id) : groupChatId;\n\n    let reminderText = '';\n    if (hasDmChat) {\n      // Sent directly via DM\n      reminderText = `${ownerName}, your \"${task.task}\" deadline is ${timePhrase}. Current progress?`;\n    } else {\n      // Sent to group chat with @mention\n      const mention = matchedMember?.telegram_username ? `@${matchedMember.telegram_username}` : (task.owner_telegram_id || ownerName);\n      reminderText = `${mention} ${ownerName}, your \"${task.task}\" deadline is ${timePhrase}. Current progress?`;\n    }\n\n    const inlineKeyboard = [\n      [\n        { text: 'Done', callback_data: `rem|${task.task_id}|completed` },\n        { text: 'In progress', callback_data: `rem|${task.task_id}|in_progress` },\n        { text: 'Need more time', callback_data: `rem|${task.task_id}|more_time` }\n      ]\n    ];\n\n    reminderMessages.push({\n      chat_id: targetChatId,\n      task_id: task.task_id,\n      text: reminderText,\n      reply_markup: {\n        inline_keyboard: inlineKeyboard\n      }\n    });\n\n    const newStatus = currentStage === 4 ? 'overdue' : (task.status || 'assigned');\n    tasksToUpdate.push({\n      ...task,\n      last_reminder_stage: currentStage,\n      status: newStatus,\n      updated_at: nowIso\n    });\n  }\n\n  results.push({\n    json: {\n      has_reminders: reminderMessages.length > 0,\n      total_reminders: reminderMessages.length,\n      reminder_dispatches: reminderMessages,\n      tasks_to_update: tasksToUpdate\n    }\n  });\n\n  return results;\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = {\n    formatDateIst,\n    processStagedReminders\n  };\n}\n\nif (typeof $input !== 'undefined') {\n  return processStagedReminders($input.all());\n}\n"
+      },
+      "id": "code-eval-reminders-004",
+      "name": "Evaluate Staged Reminders",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.has_reminders }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-has-reminders-005",
+      "name": "Has Eligible Reminders?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        980,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Split Reminder Dispatches (code-nodes/split_reminder_dispatches.js)\n * \n * Flattens array of personal reminder messages into individual items\n * for the Telegram node to send to each respective member DM or group.\n */\n\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const dispatches = item.json.reminder_dispatches || [];\n  for (const d of dispatches) {\n    results.push({\n      json: {\n        chat_id: d.chat_id,\n        task_id: d.task_id,\n        text: d.text,\n        reply_markup: d.reply_markup\n      }\n    });\n  }\n}\n\nreturn results;\n"
+      },
+      "id": "code-split-dispatches-006",
+      "name": "Split Reminder Dispatches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "reply_markup": "={{ JSON.stringify($json.reply_markup) }}"
+        }
+      },
+      "id": "tg-send-personal-reminders-007",
+      "name": "Send Personal Reminder",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1420,
+        200
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Split Reminder Updates (code-nodes/split_reminder_updates.js)\n * \n * Flattens tasks_to_update array into individual items for Google Sheets batch appendOrUpdate.\n */\n\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const rows = item.json.tasks_to_update || [];\n  for (const r of rows) {\n    results.push({ json: r });\n  }\n}\n\nif (results.length === 0) {\n  try {\n    const first = $('Evaluate Staged Reminders').first()?.json || {};\n    const rows = first.tasks_to_update || [];\n    return rows.map(r => ({ json: r }));\n  } catch (e) {\n    return [];\n  }\n}\n\nreturn results;\n"
+      },
+      "id": "code-split-updates-008",
+      "name": "Split Reminder Updates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "ActionItems",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": [
+            "task_id"
+          ],
+          "value": {
+            "task_id": "={{ $json.task_id }}",
+            "meeting_id": "={{ $json.meeting_id }}",
+            "task": "={{ $json.task }}",
+            "owner": "={{ $json.owner }}",
+            "owner_telegram_id": "={{ $json.owner_telegram_id }}",
+            "deadline": "={{ $json.deadline }}",
+            "deadline_phrase": "={{ $json.deadline_phrase }}",
+            "status": "={{ $json.status }}",
+            "source_quote": "={{ $json.source_quote }}",
+            "last_reminder_stage": "={{ $json.last_reminder_stage }}",
+            "created_at": "={{ $json.created_at }}",
+            "updated_at": "={{ $json.updated_at }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "gsheets-update-stages-009",
+      "name": "Batch Update last_reminder_stage",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1420,
+        400
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 09:00 AM IST Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Config Tab",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read Members Tab",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Config Tab": {
+      "main": [
+        [
+          {
+            "node": "Read ActionItems Tab",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Members Tab": {
+      "main": [
+        [
+          {
+            "node": "Read ActionItems Tab",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read ActionItems Tab": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Staged Reminders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Staged Reminders": {
+      "main": [
+        [
+          {
+            "node": "Has Eligible Reminders?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Eligible Reminders?": {
+      "main": [
+        [
+          {
+            "node": "Split Reminder Dispatches",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Split Reminder Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Reminder Dispatches": {
+      "main": [
+        [
+          {
+            "node": "Send Personal Reminder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Reminder Updates": {
+      "main": [
+        [
+          {
+            "node": "Batch Update last_reminder_stage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

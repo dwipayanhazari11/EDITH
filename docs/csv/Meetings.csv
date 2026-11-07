@@ -1,0 +1,2 @@
+meeting_id,meeting_date,title,summary,decisions,key_points,transcript_hash,chat_id,processed_at
+MTG-7A9B1C2D,2026-11-09,Sprint 4 Architecture Sync,"Reviewed auth refactor and staging blockers. Team finalized token rotation strategy and scheduled index audit.","• Adopt JWT rotation with 15m expiration\n• Postpone search index rewrite to Sprint 5","• Staging CPU spikes under heavy auth load\n• Redis cache layer planned for session tokens",e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855,-1001987654321,2026-11-06 23:30:00

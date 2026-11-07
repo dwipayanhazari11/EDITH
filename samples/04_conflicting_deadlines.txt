@@ -1,0 +1,10 @@
+Meeting: Hackathon Final Deliverables & Timeline Sync
+Date: 2026-11-09
+
+Dwipayan: Team, we have our core features implemented. Now we must agree on the deadline for our final demo video recording and slide deck upload.
+Rahul: I think we must finalize and upload the project demo recording by Friday, 2026-11-13 at 5:00 PM. That gives us buffer before midnight.
+Priya: No, Friday at 5 PM is impossible for me because I have semester practical exams until 4 PM. We have to finish the project demo recording by Saturday, 2026-11-14 at 12:00 PM.
+Rahul: Saturday at noon is risky if YouTube processing takes time. I strongly propose Friday, 2026-11-13.
+Priya: And I strongly propose Saturday, 2026-11-14. We don't have consensus yet on whether Friday or Saturday is the cutoff.
+Dwipayan: Since we have conflicting deadlines between Friday, Nov 13 and Saturday, Nov 14 for the demo recording, let's flag this and vote on it in the Telegram group later today.
+Rahul: Sounds fair. Let's resolve the conflict in group chat.

@@ -1,0 +1,282 @@
+{
+  "name": "EDITH_04_nl_query",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger-exec-nlq-001",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Meetings",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "gsheets-read-meetings-nlq-002",
+      "name": "Read Meetings Tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        320,
+        180
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "ActionItems",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "gsheets-read-tasks-nlq-003",
+      "name": "Read ActionItems Tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        320,
+        300
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "OpenQuestions",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "gsheets-read-questions-nlq-003b",
+      "name": "Read OpenQuestions Tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        320,
+        420
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH NL Query Context Preparer (code-nodes/format_nl_query.js)\n */\nconst items = $input.all();\nconst results = [];\n\nconst triggerData = $('Execute Workflow Trigger').first()?.json || {};\nconst userQuery = (triggerData.query || triggerData.command_args || triggerData.text || '').replace(/^\\/ask(?:@\\w+)?\\s*/i, '').trim();\nconst chatId = triggerData.chat_id;\nconst fromUser = triggerData.from || {};\nconst senderName = fromUser.name || [fromUser.first_name, fromUser.last_name].filter(Boolean).join(' ') || fromUser.username || 'User';\nconst senderTg = fromUser.username ? `@${fromUser.username}` : '';\n\nlet meetings = [];\ntry {\n  meetings = $('Read Meetings Tab').all().map(i => i.json);\n} catch (e) {\n  meetings = [];\n}\n\nlet tasks = [];\ntry {\n  tasks = $('Read ActionItems Tab').all().map(i => i.json);\n} catch (e) {\n  tasks = [];\n}\n\nlet questions = [];\ntry {\n  questions = $('Read OpenQuestions Tab').all().map(i => i.json);\n} catch (e) {\n  questions = [];\n}\n\nconst todayStr = new Date(Date.now() + 330 * 60 * 1000).toISOString().slice(0, 10);\n\nlet meetingsContext = '--- MEETINGS ---\\n';\nif (meetings.length === 0) {\n  meetingsContext += 'No meetings recorded.\\n';\n} else {\n  const sorted = [...meetings].sort((a, b) => String(b.meeting_date || '').localeCompare(String(a.meeting_date || '')));\n  sorted.forEach(m => {\n    meetingsContext += `[${m.meeting_id}] \"${m.title}\" (Date: ${m.meeting_date})\\n`;\n    meetingsContext += `Summary: ${m.summary || 'None'}\\n`;\n    if (m.decisions) meetingsContext += `Decisions:\\n${m.decisions}\\n`;\n    meetingsContext += '\\n';\n  });\n}\n\nlet tasksContext = '--- ACTION ITEMS ---\\n';\nif (tasks.length === 0) {\n  tasksContext += 'No action items recorded.\\n';\n} else {\n  tasks.forEach(t => {\n    const ownerStr = t.owner || 'Unassigned';\n    const tgStr = t.owner_telegram_id ? ` (${t.owner_telegram_id})` : '';\n    tasksContext += `[${t.task_id}] \"${t.task}\" | Owner: ${ownerStr}${tgStr} | Deadline: ${t.deadline || 'None'} | Status: ${t.status}\\n`;\n  });\n}\n\nlet questionsContext = '--- OPEN QUESTIONS ---\\n';\nif (questions.length === 0) {\n  questionsContext += 'No open questions recorded.\\n';\n} else {\n  questions.forEach(q => {\n    const leadStr = q.responsible_person ? ` | Lead: ${q.responsible_person}` : '';\n    questionsContext += `[${q.question_id || 'QST'}] \"${q.question}\"${leadStr} | Status: ${q.status || 'open'}\\n`;\n  });\n}\n\nconst identityContext = `Current User Asking: ${senderName} ${senderTg ? `(${senderTg})` : ''}\\nToday's Date (IST): ${todayStr}`;\nconst fullPrompt = `${identityContext}\\n\\n${meetingsContext}\\n${tasksContext}\\n${questionsContext}\\n\\nUser Question:\\n\"${userQuery}\"`;\n\nresults.push({\n  json: {\n    chat_id: chatId,\n    user_query: userQuery,\n    prompt_text: fullPrompt\n  }\n});\n\nreturn results;"
+      },
+      "id": "code-prep-nlq-004",
+      "name": "Prepare NL Query Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/{{ $env.GEMINI_MODEL || 'gemini-3.8-flash' }}:generateContent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "x-goog-api-key",
+              "value": "={{ $env.GEMINI_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"role\": \"user\",\n      \"parts\": [\n        {\n          \"text\": $json.prompt_text\n        }\n      ]\n    }\n  ],\n  \"systemInstruction\": {\n    \"parts\": [\n      {\n        \"text\": \"You are EDITH. Answer ONLY from sheet data, cite task IDs, and say 'I could not find that in the records' when data is missing.\"\n      }\n    ]\n  },\n  \"generationConfig\": {\n    \"temperature\": 0.1\n  }\n}",
+        "options": {}
+      },
+      "id": "http-gemini-nlq-005",
+      "name": "Call Gemini NL Query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Extract Gemini NL Query Response\n */\nconst items = $input.all();\nconst results = [];\nconst prepData = $('Prepare NL Query Context').first()?.json || {};\nconst chatId = prepData.chat_id;\n\nfor (const item of items) {\n  const json = item.json;\n  const rawAnswer = json.candidates?.[0]?.content?.parts?.[0]?.text || \"I could not find that in the records.\";\n\n  results.push({\n    json: {\n      chat_id: chatId,\n      answer: rawAnswer.trim()\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "code-extract-nlq-006",
+      "name": "Extract NL Query Answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.answer }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "tg-send-nlq-007",
+      "name": "Send Query Answer",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1220,
+        300
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Meetings Tab",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read ActionItems Tab",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read OpenQuestions Tab",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Meetings Tab": {
+      "main": [
+        [
+          {
+            "node": "Prepare NL Query Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read ActionItems Tab": {
+      "main": [
+        [
+          {
+            "node": "Prepare NL Query Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read OpenQuestions Tab": {
+      "main": [
+        [
+          {
+            "node": "Prepare NL Query Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare NL Query Context": {
+      "main": [
+        [
+          {
+            "node": "Call Gemini NL Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Gemini NL Query": {
+      "main": [
+        [
+          {
+            "node": "Extract NL Query Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract NL Query Answer": {
+      "main": [
+        [
+          {
+            "node": "Send Query Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "EDITH_99_error_handler"
+  }
+}

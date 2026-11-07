@@ -1,0 +1,181 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EDITHMeetingAnalysis",
+  "type": "object",
+  "properties": {
+    "meeting_title": {
+      "type": "string",
+      "description": "Concise, descriptive title for the meeting."
+    },
+    "meeting_summary": {
+      "type": "string",
+      "description": "Executive summary of the discussion in 2 to 4 concise sentences."
+    },
+    "key_points": {
+      "type": "array",
+      "description": "Major context and discussion topics.",
+      "items": {
+        "type": "string"
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "description": "Decisions, policies, or agreements reached.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "The decision or agreement reached."
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "True if officially agreed upon by the team; false if tentative or merely a proposal."
+          }
+        },
+        "required": [
+          "text",
+          "confirmed"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "action_items": {
+      "type": "array",
+      "description": "Action items and commitments identified in the meeting.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "Actionable task starting with an active verb."
+          },
+          "owner": {
+            "type": "string",
+            "nullable": true,
+            "description": "Name of the assigned owner. Null if unassigned. Never invent."
+          },
+          "deadline_phrase": {
+            "type": "string",
+            "nullable": true,
+            "description": "The exact verbatim timing phrase spoken in the transcript (e.g. 'by Friday')."
+          },
+          "deadline_iso": {
+            "type": "string",
+            "nullable": true,
+            "description": "Resolved deadline date in ISO 8601 format (YYYY-MM-DD), or null if missing, ambiguous, or unassigned."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "assigned",
+              "missing_deadline",
+              "ambiguous_deadline",
+              "conflicting_deadline",
+              "unassigned"
+            ],
+            "description": "Status classification of the action item."
+          },
+          "source_quote": {
+            "type": "string",
+            "description": "Verbatim short quote from the transcript proving the commitment or context."
+          },
+          "confidence": {
+            "type": "number",
+            "description": "Confidence score between 0.0 and 1.0 reflecting certainty of extraction."
+          }
+        },
+        "required": [
+          "task",
+          "owner",
+          "deadline_phrase",
+          "deadline_iso",
+          "status",
+          "source_quote",
+          "confidence"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "open_questions": {
+      "type": "array",
+      "description": "Unresolved questions, blockers, or dependencies requiring clarification.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "The unresolved question or blocker."
+          },
+          "related_task": {
+            "type": "string",
+            "nullable": true,
+            "description": "Title of the related action item, or null."
+          },
+          "responsible_person": {
+            "type": "string",
+            "nullable": true,
+            "description": "Person assigned to investigate or provide an answer, or null."
+          }
+        },
+        "required": [
+          "question",
+          "related_task",
+          "responsible_person"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "updates_to_existing_tasks": {
+      "type": "array",
+      "description": "Updates or progress reports regarding earlier open tasks from past meetings.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "existing_task_id": {
+            "type": "string",
+            "description": "The exact Task ID (e.g. TSK-1001) from earlier open tasks."
+          },
+          "change": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "re-discussed",
+              "deadline_changed"
+            ],
+            "description": "Type of update identified for the task."
+          },
+          "new_deadline_iso": {
+            "type": "string",
+            "nullable": true,
+            "description": "New target date in YYYY-MM-DD if deadline was changed, otherwise null."
+          },
+          "evidence": {
+            "type": "string",
+            "description": "Verbatim quote or proof from the transcript."
+          },
+          "confidence": {
+            "type": "number",
+            "description": "Confidence score between 0.0 and 1.0."
+          }
+        },
+        "required": [
+          "existing_task_id",
+          "change",
+          "evidence",
+          "confidence"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "meeting_title",
+    "meeting_summary",
+    "key_points",
+    "decisions",
+    "action_items",
+    "open_questions"
+  ],
+  "additionalProperties": false
+}

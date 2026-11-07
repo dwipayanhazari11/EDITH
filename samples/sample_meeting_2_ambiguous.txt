@@ -1,0 +1,14 @@
+Sprint 4 Retrospective & Open Issues Discussion
+Attendees: Dwipayan, Alex, Sarah
+
+[00:00:10] Alex: Hey team, we have several loose ends to tie up before the sprint concludes.
+[00:00:45] Dwipayan: Right. First, our staging SSL certificates are expiring in two weeks. We definitely need someone to configure the staging SSL certificates and update Cloudflare DNS.
+[00:01:15] Sarah: Has anyone volunteered for the SSL certs yet?
+[00:01:25] Alex: Not yet, we need to assign an owner for that during our next planning call.
+[00:01:50] Sarah: In the meantime, I'll draft the draft user documentation, but I'll probably get to it sometime next week since I have exams this week.
+[00:02:30] Dwipayan: Okay, "sometime next week" is fine, but let's lock down an exact date once your schedule clears up.
+[00:03:00] Alex: What about the Redis caching layer? Are we deploying a clustered Redis instance or will a standalone node be sufficient for our staging workloads?
+[00:03:40] Dwipayan: That's still an open question. Alex, can you investigate whether standalone Redis can handle our projected 2,000 requests per minute?
+[00:04:10] Alex: Sure, I will check the sizing benchmarks soon.
+[00:04:40] Sarah: Also, who is preparing the client presentation slides for the demo?
+[00:05:00] Dwipayan: We haven't picked anyone yet. Let's flag that as an unassigned action item.

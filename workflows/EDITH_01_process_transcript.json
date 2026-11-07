@@ -1,0 +1,1072 @@
+{
+  "name": "EDITH_01_process_transcript",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger-exec-001",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        40,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ Boolean($json.file_info && $json.file_info.file_id) }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-is-file-002",
+      "name": "Is Document Upload?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        240,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "operation": "get",
+        "fileId": "={{ $json.file_info.file_id }}"
+      },
+      "id": "tg-get-file-003",
+      "name": "Get Telegram File Info",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        440,
+        240
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.telegram.org/file/bot{{ $env.TELEGRAM_BOT_TOKEN }}/{{ $json.file_path }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "http-download-file-004",
+      "name": "Download File Binary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Input Validator & Normalizer (code-nodes/validate_input.js)\n * Validates raw transcript submissions, normalizes conferencing formats,\n * and extracts meeting date context in Asia/Kolkata.\n */\n\nconst MAX_BYTES = 200 * 1024; // ~200 KB limit\n\nfunction processValidateInput(items) {\n  const results = [];\n\n  for (const item of items) {\n    const json = item.json;\n\n    const chatId = json.chat_id;\n    const userId = json.user_id;\n    const username = json.username || '';\n    const messageDate = json.message_date;\n    const caption = (json.caption || '').trim();\n    const fileInfo = json.file_info || {};\n\n    // 1. Extract raw text from text field or binary buffer\n    let rawText = (json.text || '').trim();\n    let binarySize = 0;\n\n    if (item.binary && item.binary.data) {\n      const buffer = Buffer.from(item.binary.data.data, 'base64');\n      binarySize = buffer.length;\n      rawText = buffer.toString('utf-8').trim();\n    } else if (fileInfo.file_size) {\n      binarySize = fileInfo.file_size;\n    }\n\n    // 2. Validate file type and extension (if document)\n    if (fileInfo.file_name || fileInfo.mime_type) {\n      const fileName = (fileInfo.file_name || '').toLowerCase();\n      const mimeType = (fileInfo.mime_type || '').toLowerCase();\n\n      const isTxt = fileName.endsWith('.txt') || mimeType === 'text/plain';\n      if (!isTxt) {\n        results.push({\n          json: {\n            is_valid: false,\n            error_code: 'UNSUPPORTED_TYPE',\n            error_reason: 'Unsupported file format. Only plain text (.txt) files are supported.',\n            chat_id: chatId\n          }\n        });\n        continue;\n      }\n    }\n\n    // 3. Validate size\n    const totalLength = rawText.length;\n    if (binarySize > MAX_BYTES || totalLength > MAX_BYTES) {\n      results.push({\n        json: {\n          is_valid: false,\n          error_code: 'FILE_TOO_LARGE',\n          error_reason: 'File size exceeds the 200 KB limit. Please split or summarize the transcript.',\n          chat_id: chatId\n        }\n      });\n      continue;\n    }\n\n    // 4. Validate empty / whitespace\n    if (!rawText || rawText.replace(/\\s+/g, '').length === 0) {\n      results.push({\n        json: {\n          is_valid: false,\n          error_code: 'EMPTY',\n          error_reason: 'The provided text or file is completely empty.',\n          chat_id: chatId\n        }\n      });\n      continue;\n    }\n\n    // 5. Gibberish & word ratio check (Check before speaker count)\n    const tokens = rawText.split(/\\s+/).filter(Boolean);\n    const alphaWords = tokens.filter(t => /^[A-Za-z]{2,}[.,?!:;]?$/.test(t));\n    const alphaRatio = tokens.length > 0 ? (alphaWords.length / tokens.length) : 0;\n\n    const wordsWithVowels = alphaWords.filter(w => /[aeiouyAEIOUY]/.test(w));\n    const vowelRatio = alphaWords.length > 0 ? (wordsWithVowels.length / alphaWords.length) : 0;\n\n    if (tokens.length >= 8 && (alphaRatio < 0.45 || vowelRatio < 0.60)) {\n      results.push({\n        json: {\n          is_valid: false,\n          error_code: 'GIBBERISH',\n          error_reason: 'Input text appears to be unreadable or contains an excessive proportion of random symbols.',\n          chat_id: chatId\n        }\n      });\n      continue;\n    }\n\n    // 6. Speaker line & length heuristic\n    const lines = rawText.split(/\\r?\\n/).map(l => l.trim()).filter(Boolean);\n    const speakerRegex = /^(?:\\[[\\d:apmAPM\\s]+\\]\\s*|\\([\\d:apmAPM\\s]+\\)\\s*|\\d{1,2}:\\d{2}(?::\\d{2})?\\s*(?:[apAP][mM])?\\s*)?(?:[A-Za-z0-9_ -]+:|\\([A-Za-z0-9_ -]+\\):?)/;\n\n    let speakerLinesCount = 0;\n    for (const line of lines) {\n      if (speakerRegex.test(line)) {\n        speakerLinesCount++;\n      }\n    }\n\n    if (speakerLinesCount < 3 && totalLength < 300) {\n      results.push({\n        json: {\n          is_valid: false,\n          error_code: 'TOO_SHORT',\n          error_reason: 'Transcript is too brief. Meeting transcripts must contain at least 300 characters or 3 distinct speaker turns.',\n          chat_id: chatId\n        }\n      });\n      continue;\n    }\n\n    // 7. Normalization of Google Meet / conferencing transcripts\n    let normalised = rawText\n      .replace(/\\[\\s*\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*[apAP][mM])?\\s*\\]/g, '')\n      .replace(/\\(\\s*\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*[apAP][mM])?\\s*\\)/g, '')\n      .replace(/^\\s*\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*[apAP][mM])?\\s+/gm, '')\n      .replace(/^\\s*\\(([A-Za-z0-9_ -]+)\\)\\s*:?/gm, '$1:')\n      .replace(/^\\s*\\[([A-Za-z0-9_ -]+)\\]\\s*:?/gm, '$1:')\n      .replace(/\\n{3,}/g, '\\n\\n')\n      .trim();\n\n    // 8. Meeting Date Resolution\n    let resolvedDate = null;\n    const headerSlice = [caption, ...lines.slice(0, 10)].join('\\n');\n\n    const isoMatch = headerSlice.match(/(?:Date:\\s*)?(\\b20\\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])\\b)/i);\n    const ukMatch = headerSlice.match(/(?:Date:\\s*)?(\\b\\d{1,2}\\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\s+20\\d{2}\\b)/i);\n    const usMatch = headerSlice.match(/(?:Date:\\s*)?(\\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\s+\\d{1,2},?\\s+20\\d{2}\\b)/i);\n\n    if (isoMatch) {\n      resolvedDate = isoMatch[1];\n    } else if (ukMatch) {\n      const parsed = new Date(ukMatch[1]);\n      if (!isNaN(parsed.getTime())) {\n        resolvedDate = parsed.toISOString().slice(0, 10);\n      }\n    } else if (usMatch) {\n      const parsed = new Date(usMatch[1]);\n      if (!isNaN(parsed.getTime())) {\n        resolvedDate = parsed.toISOString().slice(0, 10);\n      }\n    }\n\n    if (!resolvedDate && messageDate) {\n      try {\n        const msgTimestamp = typeof messageDate === 'number' ? messageDate * 1000 : new Date(messageDate).getTime();\n        if (!isNaN(msgTimestamp)) {\n          const istDate = new Date(msgTimestamp + (330 * 60 * 1000));\n          resolvedDate = istDate.toISOString().slice(0, 10);\n        }\n      } catch (e) {\n        resolvedDate = null;\n      }\n    }\n\n    if (!resolvedDate) {\n      results.push({\n        json: {\n          is_valid: false,\n          error_code: 'MISSING_DATE',\n          error_reason: 'Could not identify a meeting date in the text or header, and message timestamp is missing. Please provide the meeting date (e.g., \"Date: YYYY-MM-DD\").',\n          chat_id: chatId\n        }\n      });\n      continue;\n    }\n\n    results.push({\n      json: {\n        is_valid: true,\n        chat_id: chatId,\n        user_id: userId,\n        username: username,\n        meeting_date: resolvedDate,\n        original_text: rawText,\n        normalised_text: normalised,\n        speaker_turns: speakerLinesCount,\n        char_count: totalLength\n      }\n    });\n  }\n\n  return results;\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = {\n    processValidateInput\n  };\n}\n\nif (typeof $input !== 'undefined') {\n  return processValidateInput($input.all());\n}\n"
+      },
+      "id": "code-validate-file-005",
+      "name": "Validate & Normalize (File)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        840,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Input Validator & Normalizer (code-nodes/validate_input.js)\n * Validates raw transcript submissions, normalizes conferencing formats,\n * and extracts meeting date context in Asia/Kolkata.\n */\n\nconst MAX_BYTES = 200 * 1024; // ~200 KB limit\n\nfunction processValidateInput(items) {\n  const results = [];\n\n  for (const item of items) {\n    const json = item.json;\n\n    const chatId = json.chat_id;\n    const userId = json.user_id;\n    const username = json.username || '';\n    const messageDate = json.message_date;\n    const caption = (json.caption || '').trim();\n    const fileInfo = json.file_info || {};\n\n    // 1. Extract raw text from text field or binary buffer\n    let rawText = (json.text || '').trim();\n    let binarySize = 0;\n\n    if (item.binary && item.binary.data) {\n      const buffer = Buffer.from(item.binary.data.data, 'base64');\n      binarySize = buffer.length;\n      rawText = buffer.toString('utf-8').trim();\n    } else if (fileInfo.file_size) {\n      binarySize = fileInfo.file_size;\n    }\n\n    // 2. Validate file type and extension (if document)\n    if (fileInfo.file_name || fileInfo.mime_type) {\n      const fileName = (fileInfo.file_name || '').toLowerCase();\n      const mimeType = (fileInfo.mime_type || '').toLowerCase();\n\n      const isTxt = fileName.endsWith('.txt') || mimeType === 'text/plain';\n      if (!isTxt) {\n        results.push({\n          json: {\n            is_valid: false,\n            error_code: 'UNSUPPORTED_TYPE',\n            error_reason: 'Unsupported file format. Only plain text (.txt) files are supported.',\n            chat_id: chatId\n          }\n        });\n        continue;\n      }\n    }\n\n    // 3. Validate size\n    const totalLength = rawText.length;\n    if (binarySize > MAX_BYTES || totalLength > MAX_BYTES) {\n      results.push({\n        json: {\n          is_valid: false,\n          error_code: 'FILE_TOO_LARGE',\n          error_reason: 'File size exceeds the 200 KB limit. Please split or summarize the transcript.',\n          chat_id: chatId\n        }\n      });\n      continue;\n    }\n\n    // 4. Validate empty / whitespace\n    if (!rawText || rawText.replace(/\\s+/g, '').length === 0) {\n      results.push({\n        json: {\n          is_valid: false,\n          error_code: 'EMPTY',\n          error_reason: 'The provided text or file is completely empty.',\n          chat_id: chatId\n        }\n      });\n      continue;\n    }\n\n    // 5. Gibberish & word ratio check (Check before speaker count)\n    const tokens = rawText.split(/\\s+/).filter(Boolean);\n    const alphaWords = tokens.filter(t => /^[A-Za-z]{2,}[.,?!:;]?$/.test(t));\n    const alphaRatio = tokens.length > 0 ? (alphaWords.length / tokens.length) : 0;\n\n    const wordsWithVowels = alphaWords.filter(w => /[aeiouyAEIOUY]/.test(w));\n    const vowelRatio = alphaWords.length > 0 ? (wordsWithVowels.length / alphaWords.length) : 0;\n\n    if (tokens.length >= 8 && (alphaRatio < 0.45 || vowelRatio < 0.60)) {\n      results.push({\n        json: {\n          is_valid: false,\n          error_code: 'GIBBERISH',\n          error_reason: 'Input text appears to be unreadable or contains an excessive proportion of random symbols.',\n          chat_id: chatId\n        }\n      });\n      continue;\n    }\n\n    // 6. Speaker line & length heuristic\n    const lines = rawText.split(/\\r?\\n/).map(l => l.trim()).filter(Boolean);\n    const speakerRegex = /^(?:\\[[\\d:apmAPM\\s]+\\]\\s*|\\([\\d:apmAPM\\s]+\\)\\s*|\\d{1,2}:\\d{2}(?::\\d{2})?\\s*(?:[apAP][mM])?\\s*)?(?:[A-Za-z0-9_ -]+:|\\([A-Za-z0-9_ -]+\\):?)/;\n\n    let speakerLinesCount = 0;\n    for (const line of lines) {\n      if (speakerRegex.test(line)) {\n        speakerLinesCount++;\n      }\n    }\n\n    if (speakerLinesCount < 3 && totalLength < 300) {\n      results.push({\n        json: {\n          is_valid: false,\n          error_code: 'TOO_SHORT',\n          error_reason: 'Transcript is too brief. Meeting transcripts must contain at least 300 characters or 3 distinct speaker turns.',\n          chat_id: chatId\n        }\n      });\n      continue;\n    }\n\n    // 7. Normalization of Google Meet / conferencing transcripts\n    let normalised = rawText\n      .replace(/\\[\\s*\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*[apAP][mM])?\\s*\\]/g, '')\n      .replace(/\\(\\s*\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*[apAP][mM])?\\s*\\)/g, '')\n      .replace(/^\\s*\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*[apAP][mM])?\\s+/gm, '')\n      .replace(/^\\s*\\(([A-Za-z0-9_ -]+)\\)\\s*:?/gm, '$1:')\n      .replace(/^\\s*\\[([A-Za-z0-9_ -]+)\\]\\s*:?/gm, '$1:')\n      .replace(/\\n{3,}/g, '\\n\\n')\n      .trim();\n\n    // 8. Meeting Date Resolution\n    let resolvedDate = null;\n    const headerSlice = [caption, ...lines.slice(0, 10)].join('\\n');\n\n    const isoMatch = headerSlice.match(/(?:Date:\\s*)?(\\b20\\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])\\b)/i);\n    const ukMatch = headerSlice.match(/(?:Date:\\s*)?(\\b\\d{1,2}\\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\s+20\\d{2}\\b)/i);\n    const usMatch = headerSlice.match(/(?:Date:\\s*)?(\\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\s+\\d{1,2},?\\s+20\\d{2}\\b)/i);\n\n    if (isoMatch) {\n      resolvedDate = isoMatch[1];\n    } else if (ukMatch) {\n      const parsed = new Date(ukMatch[1]);\n      if (!isNaN(parsed.getTime())) {\n        resolvedDate = parsed.toISOString().slice(0, 10);\n      }\n    } else if (usMatch) {\n      const parsed = new Date(usMatch[1]);\n      if (!isNaN(parsed.getTime())) {\n        resolvedDate = parsed.toISOString().slice(0, 10);\n      }\n    }\n\n    if (!resolvedDate && messageDate) {\n      try {\n        const msgTimestamp = typeof messageDate === 'number' ? messageDate * 1000 : new Date(messageDate).getTime();\n        if (!isNaN(msgTimestamp)) {\n          const istDate = new Date(msgTimestamp + (330 * 60 * 1000));\n          resolvedDate = istDate.toISOString().slice(0, 10);\n        }\n      } catch (e) {\n        resolvedDate = null;\n      }\n    }\n\n    if (!resolvedDate) {\n      results.push({\n        json: {\n          is_valid: false,\n          error_code: 'MISSING_DATE',\n          error_reason: 'Could not identify a meeting date in the text or header, and message timestamp is missing. Please provide the meeting date (e.g., \"Date: YYYY-MM-DD\").',\n          chat_id: chatId\n        }\n      });\n      continue;\n    }\n\n    results.push({\n      json: {\n        is_valid: true,\n        chat_id: chatId,\n        user_id: userId,\n        username: username,\n        meeting_date: resolvedDate,\n        original_text: rawText,\n        normalised_text: normalised,\n        speaker_turns: speakerLinesCount,\n        char_count: totalLength\n      }\n    });\n  }\n\n  return results;\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = {\n    processValidateInput\n  };\n}\n\nif (typeof $input !== 'undefined') {\n  return processValidateInput($input.all());\n}\n"
+      },
+      "id": "code-validate-text-006",
+      "name": "Validate & Normalize (Text)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_valid }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-is-valid-007",
+      "name": "Is Valid Transcript?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1040,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "=Unable to process this transcript. Please upload a valid TXT file or paste your meeting transcript.\n\nReason: {{ $json.error_reason }}",
+        "additionalFields": {}
+      },
+      "id": "tg-send-invalid-notice-008",
+      "name": "Send Invalid Input Notice",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1240,
+        500
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Deterministic ID Generator (code-nodes/make_ids.js)\n */\nconst crypto = require('crypto');\n\nfunction sha256(str) {\n  return crypto.createHash('sha256').update(str, 'utf8').digest('hex');\n}\n\nfunction normaliseTranscriptForHashing(text) {\n  return (text || '')\n    .toLowerCase()\n    .replace(/\\[\\s*\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*[apap][mm])?\\s*\\]/g, '')\n    .replace(/\\(\\s*\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*[apap][mm])?\\s*\\)/g, '')\n    .replace(/^\\s*\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*[apap][mm])?\\s+/gm, '')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const json = item.json;\n  const rawText = json.normalised_text || json.original_text || json.text || '';\n  const chatId = String(json.chat_id || '');\n\n  const normalisedForHash = normaliseTranscriptForHashing(rawText);\n  const transcriptHash = sha256(normalisedForHash + chatId);\n  const meetingId = 'MTG-' + transcriptHash.substring(0, 8).toUpperCase();\n\n  results.push({\n    json: {\n      ...json,\n      transcript_hash: transcriptHash,\n      meeting_id: meetingId,\n      normalised_for_hash: normalisedForHash,\n      retry_count: 0\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "code-make-ids-009",
+      "name": "Compute Deterministic IDs & Hash",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1240,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Meetings",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "gsheets-read-meetings-010",
+      "name": "Read Meetings Tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1440,
+        240
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Evaluate Transcript Duplicate against Meetings Tab\n */\nconst items = $input.all();\nconst results = [];\nconst makeIdsData = $('Compute Deterministic IDs & Hash').first()?.json || {};\nconst currentHash = makeIdsData.transcript_hash || '';\nconst chatId = makeIdsData.chat_id;\n\nconst existingMeetings = items.map(i => i.json);\nconst match = existingMeetings.find(m => m.transcript_hash === currentHash);\n\nif (match) {\n  results.push({\n    json: {\n      is_duplicate: true,\n      transcript_hash: currentHash,\n      chat_id: chatId,\n      existing_meeting_id: match.meeting_id || 'UNKNOWN',\n      existing_title: match.title || 'Untitled',\n      existing_processed_at: match.processed_at || match.meeting_date || 'earlier date'\n    }\n  });\n} else {\n  results.push({\n    json: {\n      ...makeIdsData,\n      is_duplicate: false\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "code-evaluate-duplicate-011",
+      "name": "Evaluate Duplicate Hash",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1660,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_duplicate }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-is-duplicate-012",
+      "name": "Is Duplicate Transcript?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1860,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "=EDITH has already processed this meeting ({{ $json.existing_processed_at }}). No new tasks were created.",
+        "additionalFields": {}
+      },
+      "id": "tg-send-duplicate-notice-013",
+      "name": "Send Duplicate Notice",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2080,
+        140
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "EDITH is analysing your meeting...",
+        "additionalFields": {}
+      },
+      "id": "tg-send-analyzing-014",
+      "name": "Send Analyzing Ack",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2080,
+        340
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/{{ $env.GEMINI_MODEL || 'gemini-3.8-flash' }}:generateContent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "x-goog-api-key",
+              "value": "={{ $env.GEMINI_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"contents\": [\n    {\n      \"role\": \"user\",\n      \"parts\": [\n        {\n          \"text\": \"=\\\"Meeting Context:\\\\nMeeting Date: \\\" + $json.meeting_date + \\\"\\\\nTimezone: \\\" + ($env.GENERIC_TIMEZONE || \\\"Asia/Kolkata\\\") + \\\"\\\\n\\\\n\\\" + ($json.earlier_tasks_context || \\\"\\\") + \\\"\\\\n\\\\nTranscript:\\\\n\\\" + $json.normalised_text\"\n        }\n      ]\n    }\n  ],\n  \"systemInstruction\": {\n    \"parts\": [\n      {\n        \"text\": \"You are EDITH, an AI meeting analyst for student teams.\\n\\nRules:\\n- never invent owners or deadlines\\n- first-person commitments (\\\"I'll do X\\\") mean the speaker owns X\\n- assignments like \\\"Priya, can you handle X?\\\" followed by agreement mean Priya owns X\\n- separate confirmed decisions from mere suggestions\\n- tasks mentioned without an owner get owner null\\n- if two people give different deadlines for the same task, set status \\\"conflicting_deadline\\\", deadline_iso null, and mention both in deadline_phrase\\n- every task needs a short verbatim source_quote\\n- use {{meeting_date}} (ISO) and {{timezone}} to resolve relative dates like \\\"Friday\\\" to the next upcoming Friday on or after the meeting date in deadline_iso\\n- vague phrases (\\\"soon\\\", \\\"sometime next week\\\") => deadline_iso null, status \\\"ambiguous_deadline\\\"\\n- if Earlier Open Tasks are provided, review the transcript for progress or updates on those earlier tasks\\n- if an existing task is reported finished (e.g. 'the frontend is done'), log it in updates_to_existing_tasks with change: 'completed' and evidence\\n- DO NOT create duplicate entries in action_items for earlier tasks that are reported completed or updated\\n- output JSON only, matching the schema\"\n      }\n    ]\n  },\n  \"generationConfig\": {\n    \"temperature\": 0.1,\n    \"responseMimeType\": \"application/json\",\n    \"responseSchema\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"meeting_title\": {\n          \"type\": \"string\"\n        },\n        \"meeting_summary\": {\n          \"type\": \"string\"\n        },\n        \"key_points\": {\n          \"type\": \"array\",\n          \"items\": {\n            \"type\": \"string\"\n          }\n        },\n        \"decisions\": {\n          \"type\": \"array\",\n          \"items\": {\n            \"type\": \"object\",\n            \"properties\": {\n              \"text\": {\n                \"type\": \"string\"\n              },\n              \"confirmed\": {\n                \"type\": \"boolean\"\n              }\n            },\n            \"required\": [\n              \"text\",\n              \"confirmed\"\n            ]\n          }\n        },\n        \"action_items\": {\n          \"type\": \"array\",\n          \"items\": {\n            \"type\": \"object\",\n            \"properties\": {\n              \"task\": {\n                \"type\": \"string\"\n              },\n              \"owner\": {\n                \"type\": \"string\",\n                \"nullable\": true\n              },\n              \"deadline_phrase\": {\n                \"type\": \"string\",\n                \"nullable\": true\n              },\n              \"deadline_iso\": {\n                \"type\": \"string\",\n                \"nullable\": true\n              },\n              \"status\": {\n                \"type\": \"string\",\n                \"enum\": [\n                  \"assigned\",\n                  \"missing_deadline\",\n                  \"ambiguous_deadline\",\n                  \"conflicting_deadline\",\n                  \"unassigned\"\n                ]\n              },\n              \"source_quote\": {\n                \"type\": \"string\"\n              },\n              \"confidence\": {\n                \"type\": \"number\"\n              }\n            },\n            \"required\": [\n              \"task\",\n              \"owner\",\n              \"deadline_phrase\",\n              \"deadline_iso\",\n              \"status\",\n              \"source_quote\",\n              \"confidence\"\n            ]\n          }\n        },\n        \"open_questions\": {\n          \"type\": \"array\",\n          \"items\": {\n            \"type\": \"object\",\n            \"properties\": {\n              \"question\": {\n                \"type\": \"string\"\n              },\n              \"related_task\": {\n                \"type\": \"string\",\n                \"nullable\": true\n              },\n              \"responsible_person\": {\n                \"type\": \"string\",\n                \"nullable\": true\n              }\n            },\n            \"required\": [\n              \"question\",\n              \"related_task\",\n              \"responsible_person\"\n            ]\n          }\n        },\n        \"updates_to_existing_tasks\": {\n          \"type\": \"array\",\n          \"items\": {\n            \"type\": \"object\",\n            \"properties\": {\n              \"existing_task_id\": {\n                \"type\": \"string\"\n              },\n              \"change\": {\n                \"type\": \"string\",\n                \"enum\": [\n                  \"completed\",\n                  \"re-discussed\",\n                  \"deadline_changed\"\n                ]\n              },\n              \"new_deadline_iso\": {\n                \"type\": \"string\",\n                \"nullable\": true\n              },\n              \"evidence\": {\n                \"type\": \"string\"\n              },\n              \"confidence\": {\n                \"type\": \"number\"\n              }\n            },\n            \"required\": [\n              \"existing_task_id\",\n              \"change\",\n              \"evidence\",\n              \"confidence\"\n            ]\n          }\n        }\n      },\n      \"required\": [\n        \"meeting_title\",\n        \"meeting_summary\",\n        \"key_points\",\n        \"decisions\",\n        \"action_items\",\n        \"open_questions\"\n      ]\n    }\n  }\n}",
+        "options": {}
+      },
+      "id": "http-gemini-analysis-015",
+      "name": "Call Gemini generateContent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2300,
+        340
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH AI Output Validator & Normalizer (code-nodes/validate_ai_output.js)\n * \n * Safely parses Gemini JSON response, verifies all schema invariants,\n * normalizes placeholder owners to null, validates ISO deadlines,\n * recomputes deterministic task statuses, deduplicates internal tasks,\n * and manages the retry counter.\n */\n\nconst ALLOWED_STATUSES = [\n  'assigned',\n  'missing_deadline',\n  'ambiguous_deadline',\n  'conflicting_deadline',\n  'unassigned'\n];\n\nconst PLACEHOLDER_OWNERS = new Set([\n  'unknown',\n  'tbd',\n  'team',\n  'everyone',\n  'all',\n  'n/a',\n  'na',\n  'unassigned',\n  'none',\n  'null',\n  ''\n]);\n\nfunction processValidateAiOutput(items) {\n  const results = [];\n\n  for (const item of items) {\n    const json = item.json;\n\n    const retryCount = json.retry_count || 0;\n    const rawTranscript = json.normalised_text || json.original_text || '';\n    const rawAiText = json.raw_ai_text || (json.candidates?.[0]?.content?.parts?.[0]?.text) || (typeof json.text === 'string' ? json.text : '') || '';\n\n    const errors = [];\n    let parsed = null;\n\n    // 1. Safe JSON Parsing\n    try {\n      const cleanText = rawAiText\n        .replace(/^\\s*```(?:json)?\\s*/i, '')\n        .replace(/\\s*```\\s*$/i, '')\n        .trim();\n\n      parsed = JSON.parse(cleanText);\n    } catch (err) {\n      errors.push(`Invalid JSON syntax: ${err.message}`);\n    }\n\n    // 2. Schema Structure Verification\n    if (parsed && typeof parsed === 'object') {\n      if (!parsed.meeting_title || typeof parsed.meeting_title !== 'string') {\n        errors.push('Missing or invalid \"meeting_title\" (expected non-empty string).');\n      }\n\n      if (parsed.meeting_summary === undefined || typeof parsed.meeting_summary !== 'string') {\n        errors.push('Missing or invalid \"meeting_summary\" (expected string).');\n      }\n\n      if (!Array.isArray(parsed.key_points)) {\n        errors.push('Missing or invalid \"key_points\" (expected array).');\n      }\n\n      if (!Array.isArray(parsed.decisions)) {\n        errors.push('Missing or invalid \"decisions\" (expected array).');\n      } else {\n        parsed.decisions = parsed.decisions.map(d => ({\n          text: String(d.text || '').trim(),\n          confirmed: Boolean(d.confirmed)\n        })).filter(d => d.text.length > 0);\n      }\n\n      if (!Array.isArray(parsed.action_items)) {\n        errors.push('Missing or invalid \"action_items\" (expected array).');\n      } else {\n        const cleanTasks = [];\n        const seenTaskNames = new Set();\n\n        for (let i = 0; i < parsed.action_items.length; i++) {\n          const raw = parsed.action_items[i];\n          const taskName = String(raw.task || '').trim();\n\n          if (!taskName) {\n            errors.push(`Action item #${i + 1} has an empty \"task\" name.`);\n            continue;\n          }\n\n          // Deduplication inside the same response\n          const normalizedTaskKey = taskName.toLowerCase().replace(/[^\\w\\s]/g, '');\n          if (seenTaskNames.has(normalizedTaskKey)) {\n            continue;\n          }\n          seenTaskNames.add(normalizedTaskKey);\n\n          // Owner Normalization (convert Unknown, TBD, Team, etc. to null)\n          let owner = raw.owner !== null && raw.owner !== undefined ? String(raw.owner).trim() : null;\n          if (owner && PLACEHOLDER_OWNERS.has(owner.toLowerCase())) {\n            owner = null;\n          }\n\n          // Deadline Phrase Normalization\n          const deadlinePhrase = raw.deadline_phrase !== null && raw.deadline_phrase !== undefined \n            ? String(raw.deadline_phrase).trim() \n            : null;\n\n          // Deadline ISO Date Validation\n          let deadlineIso = raw.deadline_iso !== null && raw.deadline_iso !== undefined \n            ? String(raw.deadline_iso).trim() \n            : null;\n\n          if (deadlineIso) {\n            const isValidDate = /^\\d{4}-\\d{2}-\\d{2}$/.test(deadlineIso) && !isNaN(new Date(deadlineIso + 'T00:00:00Z').getTime());\n            if (!isValidDate) {\n              errors.push(`Action item \"${taskName}\" has invalid deadline_iso format (\"${deadlineIso}\"). Expected YYYY-MM-DD.`);\n              deadlineIso = null;\n            }\n          }\n\n          // Status Recomputation & Verification\n          let status = raw.status || 'assigned';\n          const isVague = deadlinePhrase && /(soon|sometime|next week|later|in a few days|next sprint|eventually|after exams|maybe)/i.test(deadlinePhrase);\n\n          if (status === 'conflicting_deadline') {\n            deadlineIso = null;\n          } else if (!owner) {\n            status = 'unassigned';\n          } else if (isVague || (deadlinePhrase && !deadlineIso)) {\n            status = 'ambiguous_deadline';\n            deadlineIso = null;\n          } else if (!deadlineIso && !deadlinePhrase) {\n            status = 'missing_deadline';\n          } else if (owner && deadlineIso) {\n            status = 'assigned';\n          }\n\n          if (!ALLOWED_STATUSES.includes(status)) {\n            errors.push(`Action item \"${taskName}\" has unpermitted status \"${status}\".`);\n            status = owner ? 'assigned' : 'unassigned';\n          }\n\n          // Source Quote Validation\n          const sourceQuote = String(raw.source_quote || '').trim();\n          if (!sourceQuote) {\n            errors.push(`Action item \"${taskName}\" missing required \"source_quote\".`);\n          }\n\n          let confidence = typeof raw.confidence === 'number' ? raw.confidence : 0.9;\n          if (confidence < 0) confidence = 0;\n          if (confidence > 1) confidence = 1;\n\n          cleanTasks.push({\n            task: taskName,\n            owner: owner,\n            deadline_phrase: deadlinePhrase,\n            deadline_iso: deadlineIso,\n            status: status,\n            source_quote: sourceQuote,\n            confidence: confidence\n          });\n        }\n\n        parsed.action_items = cleanTasks;\n      }\n\n      if (!Array.isArray(parsed.open_questions)) {\n        errors.push('Missing or invalid \"open_questions\" (expected array).');\n      } else {\n        parsed.open_questions = parsed.open_questions.map(q => ({\n          question: String(q.question || '').trim(),\n          related_task: q.related_task ? String(q.related_task).trim() : null,\n          responsible_person: q.responsible_person ? String(q.responsible_person).trim() : null\n        })).filter(q => q.question.length > 0);\n      }\n\n      // Validate optional updates_to_existing_tasks (Phase 10: Meeting Memory)\n      if (parsed.updates_to_existing_tasks !== undefined) {\n        if (!Array.isArray(parsed.updates_to_existing_tasks)) {\n          errors.push('Invalid \"updates_to_existing_tasks\" (expected array if provided).');\n        } else {\n          const cleanUpdates = [];\n          const ALLOWED_CHANGES = ['completed', 're-discussed', 'deadline_changed'];\n\n          for (const u of parsed.updates_to_existing_tasks) {\n            const taskId = String(u.existing_task_id || '').trim();\n            const change = String(u.change || '').trim().toLowerCase();\n            const evidence = String(u.evidence || '').trim();\n            const confidence = typeof u.confidence === 'number' ? u.confidence : 0.9;\n            const newDeadlineIso = u.new_deadline_iso ? String(u.new_deadline_iso).trim() : null;\n\n            if (taskId && ALLOWED_CHANGES.includes(change) && confidence >= 0.85) {\n              cleanUpdates.push({\n                existing_task_id: taskId,\n                change: change,\n                new_deadline_iso: newDeadlineIso,\n                evidence: evidence,\n                confidence: confidence\n              });\n            }\n          }\n          parsed.updates_to_existing_tasks = cleanUpdates;\n\n          // Deduplication: If an existing task was marked completed, ensure no duplicate\n          // was erroneously created in action_items for the same completion report\n          if (cleanUpdates.length > 0 && Array.isArray(parsed.action_items)) {\n            const completedEvidencePhrases = cleanUpdates\n              .filter(u => u.change === 'completed')\n              .map(u => (u.evidence || '').toLowerCase());\n\n            parsed.action_items = parsed.action_items.filter(act => {\n              const actName = act.task.toLowerCase();\n              const quote = (act.source_quote || '').toLowerCase();\n              const isRedundantCompletion = completedEvidencePhrases.some(ev => \n                (ev.includes(actName) || quote.includes(ev)) && /(finished|done|complete|wrapped up)/i.test(ev)\n              );\n              return !isRedundantCompletion;\n            });\n          }\n        }\n      } else {\n        parsed.updates_to_existing_tasks = [];\n      }\n    }\n\n    // 3. Test Switch for automated acceptance tests (#test_bad_json or FORCE_BAD_JSON=true)\n    const isProd = typeof process !== 'undefined' && process.env.NODE_ENV === 'production' && process.env.FORCE_BAD_JSON !== 'true';\n    const isBadJsonTest = !isProd && (rawTranscript.includes('#test_bad_json') || (typeof process !== 'undefined' && process.env.FORCE_BAD_JSON === 'true'));\n    const isPermanentFailureTest = !isProd && rawTranscript.includes('#test_bad_json_permanent');\n\n    if (isBadJsonTest) {\n      if (retryCount === 0 || isPermanentFailureTest) {\n        errors.push('SIMULATED_ERROR: Magic phrase #test_bad_json triggered forced validation failure.');\n      }\n    }\n\n    const isValid = errors.length === 0 && parsed !== null;\n\n    results.push({\n      json: {\n        ...json,\n        valid: isValid,\n        errors: errors,\n        retry_count: retryCount,\n        data: parsed || {},\n        raw_ai_text: rawAiText\n      }\n    });\n  }\n\n  return results;\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = {\n    processValidateAiOutput\n  };\n}\n\nif (typeof $input !== 'undefined') {\n  return processValidateAiOutput($input.all());\n}\n"
+      },
+      "id": "code-validate-ai-output-016",
+      "name": "Validate AI Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2520,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.valid }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-is-output-valid-017",
+      "name": "Is AI Output Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        2740,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.retry_count }}",
+              "operation": "smaller",
+              "value2": 2
+            }
+          ]
+        }
+      },
+      "id": "if-retry-count-018",
+      "name": "Retry Count < 2?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        2940,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/{{ $env.GEMINI_MODEL || 'gemini-3.8-flash' }}:generateContent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "x-goog-api-key",
+              "value": "={{ $env.GEMINI_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"role\": \"user\",\n      \"parts\": [\n        {\n          \"text\": \"The previous JSON output failed validation with errors:\\n\" + $json.errors.join(\"\\n\") + \"\\n\\nPrevious output:\\n\" + $json.raw_ai_text + \"\\n\\nOriginal transcript:\\n\" + $json.normalised_text\n        }\n      ]\n    }\n  ],\n  \"systemInstruction\": {\n    \"parts\": [\n      {\n        \"text\": \"You are the JSON Repair Engine for EDITH. Return a 100% syntactically valid JSON object adhering to the schema. Fix all validation errors without inventing owners or deadlines.\"\n      }\n    ]\n  },\n  \"generationConfig\": {\n    \"temperature\": 0.1,\n    \"responseMimeType\": \"application/json\"\n  }\n}",
+        "options": {}
+      },
+      "id": "http-gemini-repair-019",
+      "name": "Call Gemini Repair",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3160,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Increment Retry Counter and Feed Back into Validator\n */\nconst items = $input.all();\nconst results = [];\nconst prev = $('Retry Count < 2?').first()?.json || {};\n\nfor (const item of items) {\n  const json = item.json;\n  const rawText = json.candidates?.[0]?.content?.parts?.[0]?.text || '';\n  \n  results.push({\n    json: {\n      ...prev,\n      retry_count: (prev.retry_count || 0) + 1,\n      raw_ai_text: rawText\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "code-inc-retry-020",
+      "name": "Increment Retry Counter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3380,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "EDITH could not reliably analyse this transcript. Please try again or shorten it.",
+        "additionalFields": {}
+      },
+      "id": "tg-send-permanent-fail-021",
+      "name": "Send Failure Notice",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3160,
+        600
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Members",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "gsheets-read-members-022",
+      "name": "Read Members Tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2940,
+        240
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Google Sheets Payload & Members Lookup (code-nodes/prepare_sheets_payload.js)\n * \n * Generates deterministic IDs using make_ids algorithms, performs case-insensitive\n * & first-name matching against the Members tab to populate owner_telegram_id,\n * and structures efficient batch payloads for Meetings, ActionItems, and OpenQuestions.\n */\n\nconst crypto = require('crypto');\n\nfunction sha256(str) {\n  return crypto.createHash('sha256').update(str, 'utf8').digest('hex');\n}\n\nfunction normaliseTaskText(task) {\n  return (task || '')\n    .toLowerCase()\n    .replace(/[^\\w\\s]/g, '')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction generateTaskId(meetingId, taskText, owner) {\n  const normTask = normaliseTaskText(taskText);\n  const normOwner = (owner || 'none').toLowerCase().trim();\n  const seed = `${meetingId}_${normTask}_${normOwner}`;\n  return 'TSK-' + sha256(seed).substring(0, 6).toUpperCase();\n}\n\nfunction generateQuestionId(meetingId, questionText) {\n  const normQ = normaliseTaskText(questionText);\n  const seed = `${meetingId}_${normQ}`;\n  return 'QST-' + sha256(seed).substring(0, 6).toUpperCase();\n}\n\n// Retrieve members from Read Members Tab node (if available)\nlet membersList = [];\ntry {\n  membersList = $('Read Members Tab').all().map(i => i.json);\n} catch (e) {\n  membersList = [];\n}\n\nfunction lookupMemberTelegramId(ownerName) {\n  if (!ownerName || typeof ownerName !== 'string') return '';\n  const cleanName = ownerName.trim().toLowerCase();\n  if (!cleanName || cleanName === 'none' || cleanName === 'null') return '';\n\n  const firstName = cleanName.split(' ')[0];\n\n  // 1. Try exact full name match (case-insensitive)\n  let match = membersList.find(m => (m.name || '').trim().toLowerCase() === cleanName);\n\n  // 2. Fall back to first-name match\n  if (!match) {\n    match = membersList.find(m => (m.name || '').trim().split(' ')[0].toLowerCase() === firstName);\n  }\n\n  if (match) {\n    const handle = match.telegram_username || (match.telegram_id ? `@${match.telegram_id}` : '');\n    return handle ? (handle.startsWith('@') ? handle : `@${handle}`) : '';\n  }\n\n  // Blank if not found\n  return '';\n}\n\nfunction processPrepareSheetsPayload(items, members = membersList) {\n  const results = [];\n\n  for (const item of items) {\n  const json = item.json;\n  const analysis = json.data || json.analysis || {};\n  const chatId = json.chat_id;\n  const meetingDate = json.meeting_date || analysis.meeting_date || new Date().toISOString().slice(0, 10);\n  const transcriptHash = json.transcript_hash || '';\n  const meetingId = json.meeting_id || ('MTG-' + transcriptHash.substring(0, 8).toUpperCase());\n\n  // Timestamp in IST (Asia/Kolkata, UTC+5:30)\n  const nowStr = new Date(Date.now() + 330 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19);\n\n  const meetingTitle = (analysis.meeting_title || 'Untitled Meeting').trim();\n  const meetingSummary = (analysis.meeting_summary || '').trim();\n\n  // 1. Format Decisions & Key Points\n  const decisions = Array.isArray(analysis.decisions) ? analysis.decisions : [];\n  const keyPoints = Array.isArray(analysis.key_points) ? analysis.key_points : [];\n\n  const decisionsText = decisions.map(d => `${d.confirmed ? '✅' : '⚠️'} ${d.text}`).join('\\n');\n  const keyPointsText = keyPoints.map(k => `• ${k}`).join('\\n');\n\n  // Meeting Row (for Meetings tab)\n  const meetingRow = {\n    meeting_id: meetingId,\n    meeting_date: meetingDate,\n    title: meetingTitle,\n    summary: meetingSummary,\n    decisions: decisionsText,\n    key_points: keyPointsText,\n    transcript_hash: transcriptHash,\n    chat_id: String(chatId),\n    processed_at: nowStr\n  };\n\n  // 2. Format Action Items Rows (for ActionItems tab)\n  const rawItems = Array.isArray(analysis.action_items) ? analysis.action_items : [];\n  const actionItemsRows = [];\n  const clarificationItems = [];\n\n  for (const raw of rawItems) {\n    const taskName = (raw.task || '').trim();\n    const owner = raw.owner ? String(raw.owner).trim() : '';\n    const taskId = generateTaskId(meetingId, taskName, owner);\n\n    // Look up owner_telegram_id from Members tab\n    const ownerTelegramId = lookupMemberTelegramId(owner);\n\n    const deadlinePhrase = raw.deadline_phrase ? String(raw.deadline_phrase).trim() : '';\n    const deadlineIso = raw.deadline_iso ? String(raw.deadline_iso).trim() : '';\n    const status = raw.status || (owner && deadlineIso ? 'assigned' : 'unassigned');\n    const sourceQuote = (raw.source_quote || '').trim();\n\n    actionItemsRows.push({\n      task_id: taskId,\n      meeting_id: meetingId,\n      task: taskName,\n      owner: owner,\n      owner_telegram_id: ownerTelegramId,\n      deadline: deadlineIso,\n      deadline_phrase: deadlinePhrase,\n      status: status,\n      source_quote: sourceQuote,\n      last_reminder_stage: 0,\n      created_at: nowStr,\n      updated_at: nowStr\n    });\n\n    if (status === 'unassigned' || status === 'ambiguous_deadline' || status === 'missing_deadline' || status === 'conflicting_deadline') {\n      clarificationItems.push({\n        task_id: taskId,\n        task: taskName,\n        owner: owner,\n        status: status,\n        deadline_phrase: deadlinePhrase,\n        source_quote: sourceQuote\n      });\n    }\n  }\n\n  // Phase 10: Process updates_to_existing_tasks (Meeting Memory)\n  const updatesToExisting = Array.isArray(analysis.updates_to_existing_tasks) ? analysis.updates_to_existing_tasks : [];\n  for (const u of updatesToExisting) {\n    const existingTaskId = u.existing_task_id;\n    if (!existingTaskId) continue;\n\n    if (u.change === 'completed') {\n      actionItemsRows.push({\n        task_id: existingTaskId,\n        status: 'completed',\n        updated_at: nowStr\n      });\n    } else if (u.change === 'deadline_changed' && u.new_deadline_iso) {\n      actionItemsRows.push({\n        task_id: existingTaskId,\n        deadline: u.new_deadline_iso,\n        status: 'assigned',\n        updated_at: nowStr\n      });\n    }\n  }\n\n  // 3. Format Open Questions Rows (for OpenQuestions tab)\n  const rawQuestions = Array.isArray(analysis.open_questions) ? analysis.open_questions : [];\n  const openQuestionsRows = [];\n\n  for (const q of rawQuestions) {\n    const questionText = (q.question || '').trim();\n    const questionId = generateQuestionId(meetingId, questionText);\n\n    openQuestionsRows.push({\n      question_id: questionId,\n      meeting_id: meetingId,\n      question: questionText,\n      related_task_id: (q.related_task || '').trim(),\n      responsible_person: (q.responsible_person || '').trim(),\n      status: 'open'\n    });\n  }\n\n  // 4. Construct Telegram Meeting Summary Message\n  let summaryMsg = `📋 **Meeting: ${meetingTitle}**\\n📅 **Date:** ${meetingDate}\\n\\n`;\n  summaryMsg += `**Summary:**\\n${meetingSummary || 'No summary provided.'}\\n\\n`;\n\n  if (decisions.length > 0) {\n    summaryMsg += `**Decisions:**\\n`;\n    for (const d of decisions) {\n      summaryMsg += `• ${d.confirmed ? '✅' : '⚠️'} ${d.text}\\n`;\n    }\n    summaryMsg += `\\n`;\n  }\n\n  summaryMsg += `**Action Items (${actionItemsRows.length} logged):**\\n`;\n  if (actionItemsRows.length === 0) {\n    summaryMsg += `No discrete action items identified.\\n`;\n  } else {\n    actionItemsRows.forEach((item, idx) => {\n      const isComplete = item.status === 'assigned';\n      const badge = isComplete ? '✅' : '⚠️';\n      const ownerDisplay = item.owner_telegram_id || (item.owner ? `@${item.owner}` : 'Unassigned');\n      const deadlineDisplay = item.deadline ? `📅 ${item.deadline}` : (item.deadline_phrase ? `📅 Ambiguous (\"${item.deadline_phrase}\")` : '📅 No deadline');\n      summaryMsg += `${idx + 1}. ${badge} ${item.task} — ${ownerDisplay} | ${deadlineDisplay}\\n`;\n    });\n  }\n\n  summaryMsg += `\\n*Logged to EDITH Database.*`;\n\n  // 5. Construct Telegram Clarification Message (if any)\n  let clarificationMsg = '';\n  if (clarificationItems.length > 0) {\n    clarificationMsg = `⚠️ **Clarification Required (${clarificationItems.length} items):**\\n\\n`;\n    clarificationItems.forEach((item, idx) => {\n      clarificationMsg += `${idx + 1}. **\"${item.task}\"** (${item.task_id})\\n`;\n      if (item.status === 'unassigned') {\n        clarificationMsg += `   • Issue: Owner unspecified.\\n   • Action: Who is responsible?\\n`;\n      } else if (item.status === 'ambiguous_deadline') {\n        clarificationMsg += `   • Issue: Ambiguous deadline (\"${item.deadline_phrase}\").\\n   • Action: What is the exact target date?\\n`;\n      } else if (item.status === 'missing_deadline') {\n        clarificationMsg += `   • Issue: No deadline specified.\\n   • Action: When is this due?\\n`;\n      } else if (item.status === 'conflicting_deadline') {\n        clarificationMsg += `   • Issue: Conflicting deadlines (\"${item.deadline_phrase}\").\\n   • Action: Please confirm the final target date.\\n`;\n      }\n      if (item.source_quote) {\n        clarificationMsg += `   • Source: _\"${item.source_quote}\"_\\n`;\n      }\n      clarificationMsg += `\\n`;\n    });\n    clarificationMsg += `Reply with: \\`/update <task_id> <status>\\` or update in Google Sheets.`;\n  }\n\n  results.push({\n    json: {\n      meeting_id: meetingId,\n      chat_id: chatId,\n      meeting_row: meetingRow,\n      action_items_rows: actionItemsRows,\n      open_questions_rows: openQuestionsRows,\n      updates_to_existing_tasks: updatesToExisting,\n      summary_message: summaryMsg,\n      clarification_message: clarificationMsg,\n      has_open_questions: openQuestionsRows.length > 0,\n      has_clarifications: clarificationItems.length > 0\n    }\n  });\n}\n\nreturn results;\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = {\n    sha256,\n    normaliseTaskText,\n    generateTaskId,\n    generateQuestionId,\n    processPrepareSheetsPayload\n  };\n}\n\nif (typeof $input !== 'undefined') {\n  return processPrepareSheetsPayload($input.all());\n}\n"
+      },
+      "id": "code-prepare-sheets-023",
+      "name": "Prepare Sheets Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3160,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Meetings",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "meeting_id": "={{ $json.meeting_row.meeting_id }}",
+            "meeting_date": "={{ $json.meeting_row.meeting_date }}",
+            "title": "={{ $json.meeting_row.title }}",
+            "summary": "={{ $json.meeting_row.summary }}",
+            "decisions": "={{ $json.meeting_row.decisions }}",
+            "key_points": "={{ $json.meeting_row.key_points }}",
+            "transcript_hash": "={{ $json.meeting_row.transcript_hash }}",
+            "chat_id": "={{ $json.meeting_row.chat_id }}",
+            "processed_at": "={{ $json.meeting_row.processed_at }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "gsheets-append-meetings-024",
+      "name": "Append to Meetings Tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        3380,
+        240
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Split Action Items into Discrete Rows\n */\nconst prepData = $('Prepare Sheets Payload').first()?.json || {};\nconst rows = prepData.action_items_rows || [];\n\nreturn rows.map(r => ({ json: r }));"
+      },
+      "id": "code-split-tasks-025",
+      "name": "Split Action Items Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3580,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "ActionItems",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": [
+            "task_id"
+          ]
+        },
+        "options": {}
+      },
+      "id": "gsheets-append-tasks-026",
+      "name": "Batch Append/Update ActionItems",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        3780,
+        240
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Config",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "gsheets-read-config-022b",
+      "name": "Read Config Tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2940,
+        420
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Telegram Summary & Clarification Formatter (code-nodes/format_summary.js)\n * \n * Rules:\n * 1. Formats Telegram HTML message:\n *    - header: \"EDITH MEETING REPORT\" with meeting title and date\n *    - Key Decisions (mark unconfirmed ones as \"suggested\")\n *    - Action Items: numbered, owner, task, deadline (e.g., \"Fri, 13 Nov 2026\"), status badge\n *    - Open Questions\n *    - Clarifications Required list\n *    - footer: \"Logged by EDITH | <meeting_id>\"\n * 2. Strict HTML escaping of all user-supplied text\n * 3. Splits into multiple messages if over 4096 characters, at section boundaries\n * 4. Resolves group_chat_id from Config tab (fallback to trigger chat_id)\n * 5. Prepares separate clarification messages for each incomplete task with inline keyboards:\n *    - callback_data: \"act|<task_id>|<value>\" strictly < 64 bytes\n */\n\nfunction escapeHtml(str) {\n  if (!str) return '';\n  return String(str)\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;');\n}\n\nfunction formatDateDisplay(isoStr) {\n  if (!isoStr || !/^\\d{4}-\\d{2}-\\d{2}$/.test(isoStr)) return null;\n  try {\n    const parts = isoStr.split('-');\n    const date = new Date(Date.UTC(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10)));\n    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];\n    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];\n    const dayName = days[date.getUTCDay()];\n    const day = date.getUTCDate();\n    const monName = months[date.getUTCMonth()];\n    const year = date.getUTCFullYear();\n    return `${dayName}, ${day} ${monName} ${year}`;\n  } catch (e) {\n    return isoStr;\n  }\n}\n\nfunction splitHtmlMessage(fullHtml, maxLength = 4000) {\n  if (fullHtml.length <= maxLength) return [fullHtml];\n\n  const sections = fullHtml.split('\\n\\n');\n  const chunks = [];\n  let currentChunk = '';\n\n  for (const sec of sections) {\n    if (!currentChunk) {\n      currentChunk = sec;\n    } else if ((currentChunk + '\\n\\n' + sec).length <= maxLength) {\n      currentChunk += '\\n\\n' + sec;\n    } else {\n      chunks.push(currentChunk);\n      currentChunk = sec;\n    }\n  }\n  if (currentChunk) chunks.push(currentChunk);\n  return chunks;\n}\n\n// Retrieve members and config from previous nodes (if available in n8n execution context)\nlet membersList = [];\ntry {\n  if (typeof $ !== 'undefined') {\n    membersList = $('Read Members Tab').all().map(i => i.json);\n  }\n} catch (e) {\n  membersList = [];\n}\n\nlet configList = [];\ntry {\n  if (typeof $ !== 'undefined') {\n    configList = $('Read Config Tab').all().map(i => i.json);\n  }\n} catch (e) {\n  configList = [];\n}\n\nfunction processFormatSummary(items, members = membersList, config = configList) {\n  const results = [];\n\n  for (const item of items) {\n    const json = item.json;\n\n    const payload = json.meeting_row ? json : (json.payload || json);\n    const meetingRow = payload.meeting_row || {};\n    const actionItems = payload.action_items_rows || [];\n    const openQuestions = payload.open_questions_rows || [];\n    const meetingId = payload.meeting_id || meetingRow.meeting_id || 'MTG-UNKNOWN';\n    const meetingDate = meetingRow.meeting_date || json.meeting_date || 'Date Unspecified';\n    const meetingTitle = meetingRow.title || json.meeting_title || 'Untitled Meeting';\n\n    // 1. Resolve Target Chat ID\n    const configRow = config.find(c => (c.key || '').trim().toLowerCase() === 'group_chat_id');\n    const groupChatId = (configRow?.value || '').trim();\n    const targetChatId = groupChatId || String(json.chat_id || payload.chat_id || '');\n\n    // 2. Parse Decisions & Key Points\n    let decisions = [];\n    if (json.analysis?.decisions) {\n      decisions = json.analysis.decisions;\n    } else if (meetingRow.decisions) {\n      decisions = meetingRow.decisions.split('\\n').filter(Boolean).map(line => {\n        const isConfirmed = line.includes('✅');\n        const text = line.replace(/^[✅⚠️•\\s]+/, '').replace(/\\(suggested\\)/i, '').trim();\n        return { text, confirmed: isConfirmed };\n      });\n    }\n\n    // 3. Assemble HTML Summary\n    let summaryHtml = `<b>EDITH MEETING REPORT</b>\\n`;\n    summaryHtml += `<b>Title:</b> ${escapeHtml(meetingTitle)}\\n`;\n    summaryHtml += `<b>Date:</b> ${escapeHtml(meetingDate)}\\n\\n`;\n\n    if (decisions.length > 0) {\n      summaryHtml += `<b>Key Decisions:</b>\\n`;\n      for (const d of decisions) {\n        const label = d.confirmed ? '' : ' <i>(suggested)</i>';\n        summaryHtml += `• ${escapeHtml(d.text)}${label}\\n`;\n      }\n      summaryHtml += `\\n`;\n    }\n\n    summaryHtml += `<b>Action Items (${actionItems.length} logged):</b>\\n`;\n    const incompleteItems = [];\n\n    if (actionItems.length === 0) {\n      summaryHtml += `No discrete action items recorded.\\n\\n`;\n    } else {\n      actionItems.forEach((act, idx) => {\n        const isIncomplete = ['unassigned', 'missing_deadline', 'ambiguous_deadline', 'conflicting_deadline'].includes(act.status);\n        if (isIncomplete) incompleteItems.push(act);\n\n        const statusBadge = isIncomplete ? '⚠️' : (act.status === 'completed' ? '✅' : '📌');\n        const ownerDisplay = act.owner_telegram_id || (act.owner ? `@${escapeHtml(act.owner)}` : '<i>Unassigned</i>');\n        const formattedDate = formatDateDisplay(act.deadline);\n        const deadlineDisplay = formattedDate ? formattedDate : (act.deadline_phrase ? `Ambiguous (\"${escapeHtml(act.deadline_phrase)}\")` : '<i>No deadline</i>');\n\n        summaryHtml += `${idx + 1}. ${statusBadge} <b>${escapeHtml(act.task)}</b>\\n`;\n        summaryHtml += `   • Assignee: ${ownerDisplay}\\n`;\n        summaryHtml += `   • Deadline: 📅 ${deadlineDisplay}\\n`;\n        summaryHtml += `   • Status: <code>${escapeHtml(act.status)}</code>\\n`;\n      });\n      summaryHtml += `\\n`;\n    }\n\n    if (openQuestions.length > 0) {\n      summaryHtml += `<b>Open Questions:</b>\\n`;\n      openQuestions.forEach(q => {\n        const resp = q.responsible_person ? ` (Lead: ${escapeHtml(q.responsible_person)})` : '';\n        summaryHtml += `• ❓ ${escapeHtml(q.question)}${resp}\\n`;\n      });\n      summaryHtml += `\\n`;\n    }\n\n    // Phase 10: Updates to earlier tasks (Meeting Memory)\n    const updatesToEarlier = payload.updates_to_existing_tasks || json.analysis?.updates_to_existing_tasks || [];\n    if (updatesToEarlier.length > 0) {\n      summaryHtml += `<b>Updates to earlier tasks:</b>\\n`;\n      updatesToEarlier.forEach(u => {\n        const changeBadge = u.change === 'completed' ? '✅' : '🔄';\n        const evidenceStr = u.evidence ? ` <i>(\"${escapeHtml(u.evidence)}\")</i>` : '';\n        summaryHtml += `• ${changeBadge} <code>${escapeHtml(u.existing_task_id)}</code> — Marked <code>${escapeHtml(u.change)}</code>${evidenceStr}\\n`;\n      });\n      summaryHtml += `\\n`;\n    }\n\n    if (incompleteItems.length > 0) {\n      summaryHtml += `<b>Clarifications Required:</b>\\n`;\n      incompleteItems.forEach(item => {\n        let reason = 'Incomplete details';\n        if (item.status === 'unassigned') reason = 'Owner unassigned';\n        else if (item.status === 'missing_deadline') reason = 'Missing deadline';\n        else if (item.status === 'ambiguous_deadline') reason = `Ambiguous deadline (\"${item.deadline_phrase}\")`;\n        else if (item.status === 'conflicting_deadline') reason = `Conflicting deadline (\"${item.deadline_phrase}\")`;\n\n        summaryHtml += `• ⚠️ <b>${escapeHtml(item.task)}</b> (<code>${item.task_id}</code>) — ${reason}\\n`;\n      });\n      summaryHtml += `\\n`;\n    }\n\n    summaryHtml += `Logged by EDITH | <code>${meetingId}</code>`;\n\n    // 4. Split HTML message if > 4096 characters\n    const summaryMessages = splitHtmlMessage(summaryHtml, 4000);\n\n    // 5. Build Individual Clarification Messages with Inline Buttons (< 64 bytes)\n    const clarificationDispatches = [];\n\n    for (const item of incompleteItems) {\n      const taskId = item.task_id;\n      let clarifyText = '';\n      const inlineKeyboard = [];\n\n      if (item.status === 'unassigned') {\n        clarifyText = `⚠️ <b>Incomplete assignment detected.</b>\\n\\n` +\n          `<b>Task:</b> ${escapeHtml(item.task)}\\n` +\n          `<b>ID:</b> <code>${taskId}</code>\\n\\n` +\n          `No owner identified. Who will take this?`;\n\n        // Button: Assign to me (callback_data: act|TSK-XXXXXX|me)\n        const row1 = [{ text: 'Assign to me', callback_data: `act|${taskId}|me` }];\n\n        // Up to 4 Member Name Buttons\n        const memberButtons = [];\n        const eligibleMembers = members.filter(m => m.name || m.telegram_username).slice(0, 4);\n        for (const m of eligibleMembers) {\n          const displayName = m.name || m.telegram_username;\n          const valueId = (m.telegram_username ? `@${m.telegram_username}` : m.name).substring(0, 20);\n          memberButtons.push({\n            text: displayName.substring(0, 16),\n            callback_data: `act|${taskId}|u:${valueId}`\n          });\n        }\n\n        const rows = [row1];\n        if (memberButtons.length > 0) {\n          for (let i = 0; i < memberButtons.length; i += 2) {\n            rows.push(memberButtons.slice(i, i + 2));\n          }\n        }\n        rows.push([{ text: 'Skip', callback_data: `act|${taskId}|skip` }]);\n        inlineKeyboard.push(...rows);\n\n      } else if (item.status === 'missing_deadline' || item.status === 'ambiguous_deadline') {\n        const ownerDisplay = item.owner_telegram_id || (item.owner ? `@${item.owner}` : 'Unassigned');\n        clarifyText = `⚠️ <b>Incomplete deadline detected.</b>\\n\\n` +\n          `<b>Task:</b> ${escapeHtml(item.task)}\\n` +\n          `<b>ID:</b> <code>${taskId}</code>\\n` +\n          `<b>Assignee:</b> ${ownerDisplay}\\n` +\n          (item.status === 'ambiguous_deadline' ? `<b>Stated phrase:</b> \"<i>${escapeHtml(item.deadline_phrase)}</i>\"\\n\\n` : `\\n`) +\n          `No concrete target date was specified. When is this due?`;\n\n        inlineKeyboard.push([\n          { text: 'Tomorrow', callback_data: `act|${taskId}|tomorrow` },\n          { text: 'This Friday', callback_data: `act|${taskId}|friday` }\n        ]);\n        inlineKeyboard.push([\n          { text: 'Next week', callback_data: `act|${taskId}|next_week` },\n          { text: 'Skip', callback_data: `act|${taskId}|skip` }\n        ]);\n\n      } else if (item.status === 'conflicting_deadline') {\n        const ownerDisplay = item.owner_telegram_id || (item.owner ? `@${item.owner}` : 'Unassigned');\n        clarifyText = `⚠️ <b>Conflicting deadlines detected.</b>\\n\\n` +\n          `<b>Task:</b> ${escapeHtml(item.task)}\\n` +\n          `<b>ID:</b> <code>${taskId}</code>\\n` +\n          `<b>Assignee:</b> ${ownerDisplay}\\n` +\n          `<b>Proposed dates:</b> <i>${escapeHtml(item.deadline_phrase)}</i>\\n\\n` +\n          `Which target date is correct?`;\n\n        const parts = (item.deadline_phrase || '').split(/(?:vs|or|and|\\/|,)/i).map(p => p.trim()).filter(Boolean);\n        const conflictButtons = [];\n        parts.slice(0, 3).forEach((p, idx) => {\n          const cleanVal = p.toLowerCase().replace(/[^a-z0-9_-]/g, '').substring(0, 16) || `opt${idx + 1}`;\n          conflictButtons.push({\n            text: p.substring(0, 16),\n            callback_data: `act|${taskId}|d:${cleanVal}`\n          });\n        });\n\n        if (conflictButtons.length > 0) {\n          inlineKeyboard.push(conflictButtons);\n        } else {\n          inlineKeyboard.push([\n            { text: 'Tomorrow', callback_data: `act|${taskId}|tomorrow` },\n            { text: 'This Friday', callback_data: `act|${taskId}|friday` }\n          ]);\n        }\n        inlineKeyboard.push([{ text: 'Skip', callback_data: `act|${taskId}|skip` }]);\n      }\n\n      clarificationDispatches.push({\n        chat_id: targetChatId,\n        task_id: taskId,\n        text: clarifyText,\n        reply_markup: {\n          inline_keyboard: inlineKeyboard\n        }\n      });\n    }\n\n    results.push({\n      json: {\n        target_chat_id: targetChatId,\n        meeting_id: meetingId,\n        summary_messages: summaryMessages,\n        summary_html: summaryMessages[0],\n        additional_summary_messages: summaryMessages.slice(1),\n        has_multiple_summary_messages: summaryMessages.length > 1,\n        clarification_dispatches: clarificationDispatches,\n        has_clarifications: clarificationDispatches.length > 0\n      }\n    });\n  }\n\n  return results;\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = {\n    escapeHtml,\n    formatDateDisplay,\n    splitHtmlMessage,\n    processFormatSummary\n  };\n}\n\nif (typeof $input !== 'undefined') {\n  return processFormatSummary($input.all());\n}\n"
+      },
+      "id": "code-format-summary-027",
+      "name": "Format HTML Summary & Clarifications",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4000,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.target_chat_id }}",
+        "text": "={{ $json.summary_html }}",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "tg-send-summary-html-028",
+      "name": "Send Meeting Summary (HTML)",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        4220,
+        240
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.has_clarifications }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-has-clarify-029",
+      "name": "Has Clarifications?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        4440,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Split Clarification Dispatches (code-nodes/split_clarification_dispatches.js)\n * \n * Flattens array of clarification messages into individual n8n items\n * so the Telegram node sends a dedicated message with inline buttons\n * for each incomplete task.\n */\n\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const dispatches = item.json.clarification_dispatches || [];\n  for (const d of dispatches) {\n    results.push({\n      json: {\n        chat_id: d.chat_id,\n        task_id: d.task_id,\n        text: d.text,\n        reply_markup: d.reply_markup\n      }\n    });\n  }\n}\n\nreturn results;\n"
+      },
+      "id": "code-split-clarify-030",
+      "name": "Split Clarification Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4660,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "reply_markup": "={{ JSON.stringify($json.reply_markup) }}"
+        }
+      },
+      "id": "tg-send-clarify-btns-031",
+      "name": "Send Clarification with Buttons",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        4880,
+        200
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "ActionItems",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "gsheets-read-tasks-mem-010b",
+      "name": "Read ActionItems Tab (Memory)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1440,
+        420
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Meeting Memory & Open Tasks Extractor (code-nodes/extract_meeting_memory.js)\n */\nconst items = $input.all();\nconst results = [];\n\nlet meetings = [];\ntry {\n  meetings = $('Read Meetings Tab').all().map(i => i.json);\n} catch (e) {\n  meetings = [];\n}\n\nlet tasks = [];\ntry {\n  tasks = $('Read ActionItems Tab (Memory)').all().map(i => i.json);\n} catch (e) {\n  tasks = [];\n}\n\nfor (const item of items) {\n  const json = item.json;\n  const chatId = String(json.chat_id || '');\n\n  // 1. Filter meetings for this specific chat\n  const chatMeetings = meetings.filter(m => String(m.chat_id || '') === chatId);\n\n  let memoryContext = 'Earlier Open Tasks: None recorded from previous meetings.';\n  if (chatMeetings.length > 0) {\n    // Sort by meeting_date descending and take up to 3\n    const sorted = [...chatMeetings].sort((a, b) => {\n      const dateA = a.meeting_date || a.processed_at || '';\n      const dateB = b.meeting_date || b.processed_at || '';\n      return String(dateB).localeCompare(String(dateA));\n    });\n\n    const last3MeetingIds = new Set(sorted.slice(0, 3).map(m => m.meeting_id).filter(Boolean));\n\n    const openTasks = tasks.filter(t => {\n      if (!last3MeetingIds.has(t.meeting_id)) return false;\n      const status = (t.status || '').toLowerCase().trim();\n      return status !== 'completed';\n    });\n\n    if (openTasks.length > 0) {\n      memoryContext = 'Earlier Open Tasks (from recent meetings of this group):\\n';\n      openTasks.forEach(t => {\n        const ownerStr = t.owner || 'Unassigned';\n        const tgStr = t.owner_telegram_id ? ` (${t.owner_telegram_id})` : '';\n        const deadlineStr = t.deadline || t.deadline_phrase || 'No deadline';\n        memoryContext += `- [${t.task_id}] \"${t.task}\" | Owner: ${ownerStr}${tgStr} | Status: ${t.status} | Deadline: ${deadlineStr}\\n`;\n      });\n      memoryContext = memoryContext.trim();\n    }\n  }\n\n  results.push({\n    json: {\n      ...json,\n      earlier_tasks_context: memoryContext\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "code-extract-mem-014b",
+      "name": "Extract Meeting Memory & Open Tasks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2180,
+        340
+      ]
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Is Document Upload?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Document Upload?": {
+      "main": [
+        [
+          {
+            "node": "Get Telegram File Info",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Validate & Normalize (Text)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Telegram File Info": {
+      "main": [
+        [
+          {
+            "node": "Download File Binary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download File Binary": {
+      "main": [
+        [
+          {
+            "node": "Validate & Normalize (File)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Normalize (File)": {
+      "main": [
+        [
+          {
+            "node": "Is Valid Transcript?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Normalize (Text)": {
+      "main": [
+        [
+          {
+            "node": "Is Valid Transcript?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Valid Transcript?": {
+      "main": [
+        [
+          {
+            "node": "Compute Deterministic IDs & Hash",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Invalid Input Notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Deterministic IDs & Hash": {
+      "main": [
+        [
+          {
+            "node": "Read Meetings Tab",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read ActionItems Tab (Memory)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Meetings Tab": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Duplicate Hash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Duplicate Hash": {
+      "main": [
+        [
+          {
+            "node": "Is Duplicate Transcript?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Duplicate Transcript?": {
+      "main": [
+        [
+          {
+            "node": "Send Duplicate Notice",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Analyzing Ack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Analyzing Ack": {
+      "main": [
+        [
+          {
+            "node": "Extract Meeting Memory & Open Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Gemini generateContent": {
+      "main": [
+        [
+          {
+            "node": "Validate AI Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate AI Output": {
+      "main": [
+        [
+          {
+            "node": "Is AI Output Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is AI Output Valid?": {
+      "main": [
+        [
+          {
+            "node": "Read Members Tab",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retry Count < 2?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry Count < 2?": {
+      "main": [
+        [
+          {
+            "node": "Call Gemini Repair",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Failure Notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Gemini Repair": {
+      "main": [
+        [
+          {
+            "node": "Increment Retry Counter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Increment Retry Counter": {
+      "main": [
+        [
+          {
+            "node": "Validate AI Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Members Tab": {
+      "main": [
+        [
+          {
+            "node": "Prepare Sheets Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Sheets Payload": {
+      "main": [
+        [
+          {
+            "node": "Append to Meetings Tab",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append to Meetings Tab": {
+      "main": [
+        [
+          {
+            "node": "Split Action Items Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Action Items Rows": {
+      "main": [
+        [
+          {
+            "node": "Batch Append/Update ActionItems",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch Append/Update ActionItems": {
+      "main": [
+        [
+          {
+            "node": "Format HTML Summary & Clarifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Clarifications?": {
+      "main": [
+        [
+          {
+            "node": "Split Clarification Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format HTML Summary & Clarifications": {
+      "main": [
+        [
+          {
+            "node": "Send Meeting Summary (HTML)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Meeting Summary (HTML)": {
+      "main": [
+        [
+          {
+            "node": "Has Clarifications?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Clarification Items": {
+      "main": [
+        [
+          {
+            "node": "Send Clarification with Buttons",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Meeting Memory & Open Tasks": {
+      "main": [
+        [
+          {
+            "node": "Call Gemini generateContent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "EDITH_99_error_handler"
+  }
+}

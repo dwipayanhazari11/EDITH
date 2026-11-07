@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EDITHProgressMatchResponse",
+  "type": "object",
+  "properties": {
+    "matched_task_id": {
+      "type": ["string", "null"],
+      "description": "The exact task_id (e.g. TSK-1001) of the single matching open task, or null if no single confident match."
+    },
+    "new_status": {
+      "type": ["string", "null"],
+      "enum": ["completed", "in_progress", null],
+      "description": "The updated status indicated by the progress statement (completed or in_progress)."
+    },
+    "confidence": {
+      "type": "number",
+      "description": "Confidence score between 0.0 and 1.0."
+    },
+    "candidate_task_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of task_ids considered relevant if multiple open tasks match."
+    }
+  },
+  "required": [
+    "matched_task_id",
+    "new_status",
+    "confidence",
+    "candidate_task_ids"
+  ],
+  "additionalProperties": false
+}

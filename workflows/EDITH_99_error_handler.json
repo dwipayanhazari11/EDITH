@@ -1,0 +1,79 @@
+{
+  "name": "EDITH_99_error_handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "error-trigger-001",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Error Alert Formatter\n */\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const json = item.json;\n  const workflowName = json.workflow?.name || 'Unknown Workflow';\n  const executionId = json.execution?.id || 'N/A';\n  const nodeName = json.execution?.error?.node?.name || 'Unknown Node';\n  let rawErrorMessage = json.execution?.error?.message || 'Unspecified runtime error';\n\n  const sanitizedError = rawErrorMessage\n    .replace(/(?:bot)?\\d{9,10}:[A-Za-z0-9_-]{35}/g, '[REDACTED_TELEGRAM_TOKEN]')\n    .replace(/(?:AIzaSy|key=)[A-Za-z0-9_-]{30,}/g, '[REDACTED_API_KEY]')\n    .replace(/[a-f0-9]{32,64}/gi, (match) => match.length >= 32 ? '[REDACTED_HASH_OR_KEY]' : match);\n\n  const timestamp = new Date(Date.now() + 330 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19);\n\n  const alertMessage = `⚠️ **EDITH System Alert: Workflow Failure**\\n\\n` +\n    `• **Workflow:** ${workflowName}\\n` +\n    `• **Failed Node:** ${nodeName}\\n` +\n    `• **Execution ID:** \\`${executionId}\\`\\n` +\n    `• **Time (IST):** ${timestamp}\\n\\n` +\n    `**Error Details:**\\n\\`${sanitizedError}\\``;\n\n  results.push({\n    json: {\n      alert_message: alertMessage,\n      workflow_name: workflowName,\n      node_name: nodeName,\n      execution_id: executionId,\n      error_message: sanitizedError,\n      chat_id: $env.TELEGRAM_ADMIN_CHAT_ID || $env.TELEGRAM_GROUP_CHAT_ID || -1001234567890\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "code-format-error-002",
+      "name": "Format Error Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.alert_message }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "tg-send-error-alert-003",
+      "name": "Send Admin Error Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        700,
+        300
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error Alert": {
+      "main": [
+        [
+          {
+            "node": "Send Admin Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

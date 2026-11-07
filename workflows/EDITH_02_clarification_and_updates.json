@@ -1,0 +1,629 @@
+{
+  "name": "EDITH_02_clarification_and_updates",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger-exec-update-001",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        100,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Task Update & Clarification Action Parser (code-nodes/parse_update_action.js)\n * \n * Classifies incoming actions into:\n * 1. Active Tasks Board query (/tasks)\n * 2. Inline button callback query (act|<task_id>|<value>)\n * 3. Free-text reply to clarification message\n * 4. Slash commands (/update, /done, /assign, /deadline)\n */\n\nfunction getIstDate(offsetDays = 0) {\n  const istTime = new Date(Date.now() + (330 + offsetDays * 1440) * 60 * 1000);\n  return istTime.toISOString().slice(0, 10);\n}\n\nfunction getNextWeekdayIst(targetDayOfWeek) { // 0 = Sun, 1 = Mon, ..., 5 = Fri\n  const now = new Date(Date.now() + 330 * 60 * 1000);\n  const currentDay = now.getUTCDay();\n  let diff = targetDayOfWeek - currentDay;\n  if (diff <= 0) diff += 7;\n  const targetDate = new Date(now.getTime() + diff * 24 * 60 * 60 * 1000);\n  return targetDate.toISOString().slice(0, 10);\n}\n\nconst VALID_STATUSES = new Set([\n  'assigned',\n  'missing_deadline',\n  'ambiguous_deadline',\n  'conflicting_deadline',\n  'unassigned',\n  'in_progress',\n  'completed',\n  'overdue'\n]);\n\nfunction processUpdateAction(items) {\n  const results = [];\n\n  for (const item of items) {\n    const json = item.json;\n\n    let taskId = null;\n    let newStatus = null;\n    let newOwner = null;\n    let newDeadline = null;\n    let actionType = 'unknown';\n    let isTasksQuery = false;\n    let isCallback = false;\n    let isClarifyReply = false;\n    let isCommand = false;\n    let skipAction = false;\n\n    const chatId = json.chat_id;\n    const fromUser = json.from || {};\n    const userHandle = fromUser.username ? `@${fromUser.username}` : (fromUser.name || 'User');\n    const command = (json.command || '').toLowerCase();\n    const text = (json.text || json.raw_text || '').trim();\n    const args = (json.command_args || '').trim();\n    const callbackData = (json.callback_data || '').trim();\n    const callbackQueryId = json.callback_query_id || null;\n\n    // Route 1: /tasks query\n    if (command === 'tasks' || text === '/tasks' || text.startsWith('/tasks')) {\n      isTasksQuery = true;\n      actionType = 'tasks_query';\n      results.push({\n        json: {\n          is_tasks_query: true,\n          is_callback: false,\n          is_clarify_reply: false,\n          is_command: true,\n          action_type: actionType,\n          chat_id: chatId\n        }\n      });\n      continue;\n    }\n\n    // Route 2: Inline button callback (act|<task_id>|<value>)\n    if (callbackData) {\n      isCallback = true;\n      actionType = 'callback';\n      const parts = callbackData.includes('|') ? callbackData.split('|') : callbackData.split(':');\n      const prefix = parts[0]?.toLowerCase();\n      taskId = (parts[1] || '').trim().toUpperCase();\n      const val = (parts[2] || '').trim();\n\n      if (val === 'skip') {\n        skipAction = true;\n      } else if (val === 'me') {\n        newOwner = userHandle;\n      } else if (val.startsWith('u:')) {\n        newOwner = val.substring(2).trim();\n      } else if (val === 'tomorrow') {\n        newDeadline = getIstDate(1);\n      } else if (val === 'friday') {\n        newDeadline = getNextWeekdayIst(5);\n      } else if (val === 'next_week') {\n        newDeadline = getNextWeekdayIst(1);\n      } else if (val.startsWith('d:')) {\n        const rawDate = val.substring(2).trim();\n        if (/^\\d{4}-\\d{2}-\\d{2}$/.test(rawDate)) {\n          newDeadline = rawDate;\n        } else if (rawDate === 'tomorrow') {\n          newDeadline = getIstDate(1);\n        } else if (rawDate === 'friday') {\n          newDeadline = getNextWeekdayIst(5);\n        } else {\n          newDeadline = getIstDate(2);\n        }\n      } else if (prefix === 'status') {\n        newStatus = val.toLowerCase();\n      } else if (prefix === 'assign') {\n        newOwner = val === 'self' ? userHandle : val;\n      } else if (prefix === 'deadline') {\n        newDeadline = val;\n      }\n    }\n\n    // Route 3: Slash Commands\n    if (!isCallback) {\n      if (command === 'done' || text.startsWith('/done')) {\n        isCommand = true;\n        actionType = 'command_done';\n        const match = text.match(/^\\/done(?:@\\w+)?\\s+(TSK-\\w+)/i) || args.match(/^(TSK-\\w+)/i);\n        if (match) {\n          taskId = match[1].toUpperCase();\n          newStatus = 'completed';\n        }\n      } else if (command === 'update' || text.startsWith('/update')) {\n        isCommand = true;\n        actionType = 'command_update';\n        const match = (args || text.replace(/^\\/update(?:@\\w+)?\\s*/i, '')).match(/^(TSK-\\w+)\\s+([a-zA-Z_]+)/i);\n        if (match) {\n          taskId = match[1].toUpperCase();\n          newStatus = match[2].toLowerCase();\n          if (newStatus === 'done') newStatus = 'completed';\n        }\n      } else if (command === 'assign' || text.startsWith('/assign')) {\n        isCommand = true;\n        actionType = 'command_assign';\n        const match = (args || text.replace(/^\\/assign(?:@\\w+)?\\s*/i, '')).match(/^(TSK-\\w+)\\s+(.+)/i);\n        if (match) {\n          taskId = match[1].toUpperCase();\n          newOwner = match[2].trim();\n        }\n      } else if (command === 'deadline' || text.startsWith('/deadline')) {\n        isCommand = true;\n        actionType = 'command_deadline';\n        const match = (args || text.replace(/^\\/deadline(?:@\\w+)?\\s*/i, '')).match(/^(TSK-\\w+)\\s+(\\d{4}-\\d{2}-\\d{2})/i);\n        if (match) {\n          taskId = match[1].toUpperCase();\n          newDeadline = match[2];\n        }\n      }\n    }\n\n    // Route 4: Free-text reply to a clarification message\n    if (!isCallback && !isCommand && (json.route === 'reply' || json.reply_to_text)) {\n      const replyText = json.reply_to_text || '';\n      const targetMatch = replyText.match(/\\b(TSK-\\w+)\\b/i) || text.match(/\\b(TSK-\\w+)\\b/i);\n\n      if (targetMatch) {\n        taskId = targetMatch[1].toUpperCase();\n        isClarifyReply = true;\n        actionType = 'clarify_reply';\n      }\n    }\n\n    // Validate new status if present\n    if (newStatus && !VALID_STATUSES.has(newStatus)) {\n      if (newStatus === 'done') newStatus = 'completed';\n      else if (newStatus === 'working' || newStatus === 'progress') newStatus = 'in_progress';\n      else newStatus = null;\n    }\n\n    results.push({\n      json: {\n        is_tasks_query: isTasksQuery,\n        is_callback: isCallback,\n        is_clarify_reply: isClarifyReply,\n        is_command: isCommand,\n        skip_action: skipAction,\n        action_type: actionType,\n        callback_query_id: callbackQueryId,\n        task_id: taskId,\n        new_status: newStatus,\n        new_owner: newOwner,\n        new_deadline: newDeadline,\n        chat_id: chatId,\n        user_handle: userHandle,\n        reply_text: text,\n        reply_to_text: json.reply_to_text || '',\n        reference_date: getIstDate(0),\n        weekday: new Date(Date.now() + 330 * 60 * 1000).toLocaleDateString('en-US', { weekday: 'long' }),\n        is_valid_update: Boolean(taskId && (newStatus || newOwner || newDeadline || isClarifyReply || skipAction))\n      }\n    });\n  }\n\n  return results;\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = {\n    getIstDate,\n    getNextWeekdayIst,\n    processUpdateAction\n  };\n}\n\nif (typeof $input !== 'undefined') {\n  return processUpdateAction($input.all());\n}\n"
+      },
+      "id": "code-parse-update-002",
+      "name": "Parse Update Action",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        320,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_tasks_query }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-is-tasks-query-003",
+      "name": "Is /tasks Query?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        540,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "ActionItems",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "gsheets-read-tasks-board-004",
+      "name": "Read ActionItems (Board)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        760,
+        100
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Filtered Task Board Formatter (code-nodes/format_tasks_filtered.js)\n * \n * Implements:\n * 1. /tasks (no args): Lists sender's pending tasks\n * 2. /tasks overdue: Lists all overdue tasks\n * 3. /tasks all: Lists all open tasks grouped by owner\n */\n\nfunction formatDateIst(ms = Date.now()) {\n  const d = new Date(ms + 330 * 60 * 1000);\n  return d.toISOString().slice(0, 10);\n}\n\nfunction processFormatTasksFiltered(items, allTasks = [], triggerData = {}) {\n  const results = [];\n\n  const chatId = triggerData.chat_id || '';\n  const fromUser = triggerData.from || {};\n  const senderUsername = (fromUser.username || '').replace(/^@/, '').trim().toLowerCase();\n  const senderName = [fromUser.first_name, fromUser.last_name].filter(Boolean).join(' ').trim().toLowerCase();\n\n  const text = (triggerData.text || triggerData.command_args || '').trim();\n  const arg = text.replace(/^\\/tasks(?:@\\w+)?\\s*/i, '').trim().toLowerCase();\n\n  const todayStr = formatDateIst();\n  const openTasks = allTasks.filter(t => (t.status || '').toLowerCase() !== 'completed');\n\n  let msg = '';\n\n  // Case 1: /tasks overdue\n  if (arg === 'overdue') {\n    const overdueTasks = openTasks.filter(t => \n      t.status === 'overdue' || (t.deadline && t.deadline < todayStr)\n    );\n\n    if (overdueTasks.length === 0) {\n      msg = `✅ **EDITH Tasks: Overdue**\\n\\nNo overdue action items. All tasks are currently on schedule.`;\n    } else {\n      msg = `⚠️ **EDITH Tasks: Overdue (${overdueTasks.length} items)**\\n\\n`;\n      overdueTasks.forEach((t, i) => {\n        const owner = t.owner_telegram_id || (t.owner ? `@${t.owner}` : 'Unassigned');\n        msg += `${i + 1}. ⚠️ **${t.task}** (\\`${t.task_id}\\`)\\n`;\n        msg += `   • Assignee: ${owner} | Due: 📅 ${t.deadline} (Overdue)\\n`;\n        msg += `   • Status: \\`${t.status}\\`\\n\\n`;\n      });\n      msg += `*Update status via: \\`/done <task_id>\\`.*`;\n    }\n\n  // Case 2: /tasks all (Grouped by owner)\n  } else if (arg === 'all') {\n    if (openTasks.length === 0) {\n      msg = `📋 **EDITH Master Task Board**\\n\\nNo active tasks in EDITH Database. Everything is completed.`;\n    } else {\n      // Group tasks by owner\n      const grouped = {};\n      openTasks.forEach(t => {\n        const ownerKey = t.owner ? t.owner.trim() : 'Unassigned';\n        if (!grouped[ownerKey]) grouped[ownerKey] = [];\n        grouped[ownerKey].push(t);\n      });\n\n      msg = `📋 **EDITH Master Task Board (${openTasks.length} open tasks)**\\n\\n`;\n      for (const [owner, tasks] of Object.entries(grouped)) {\n        const handle = tasks[0].owner_telegram_id ? ` (${tasks[0].owner_telegram_id})` : '';\n        msg += `👤 **${owner}**${handle}:\\n`;\n        tasks.forEach((t, i) => {\n          const isOverdue = t.deadline && t.deadline < todayStr;\n          const badge = isOverdue ? '⚠️ [OVERDUE]' : (!t.owner ? '⚠️' : '📌');\n          const dl = t.deadline ? `📅 ${t.deadline}` : '📅 No deadline';\n          msg += `  ${i + 1}. ${badge} **${t.task}** (\\`${t.task_id}\\`) | ${dl}\\n`;\n        });\n        msg += `\\n`;\n      }\n      msg += `*Update tasks with \\`/update <task_id> completed\\` or \\`/done <task_id>\\`.*`;\n    }\n\n  // Case 3: /tasks (Sender's pending tasks)\n  } else {\n    const myTasks = openTasks.filter(t => {\n      const taskOwner = (t.owner || '').trim().toLowerCase();\n      const taskOwnerTg = (t.owner_telegram_id || '').replace(/^@/, '').trim().toLowerCase();\n      if (!taskOwner && !taskOwnerTg) return false;\n      return (senderUsername && taskOwnerTg === senderUsername) ||\n             (senderName && taskOwner && (taskOwner === senderName || taskOwner.includes(senderName) || senderName.includes(taskOwner)));\n    });\n\n    if (myTasks.length === 0) {\n      msg = `📋 **Your Assigned Tasks**\\n\\nNo pending action items assigned to you.\\n\\n` +\n            `• View team overdue tasks: \\`/tasks overdue\\`\\n` +\n            `• View all team tasks: \\`/tasks all\\``;\n    } else {\n      msg = `📋 **Your Assigned Tasks (${myTasks.length} pending):**\\n\\n`;\n      myTasks.forEach((t, i) => {\n        const isOverdue = t.deadline && t.deadline < todayStr;\n        const badge = isOverdue ? '⚠️ [OVERDUE]' : '📌';\n        const dl = t.deadline ? `📅 ${t.deadline}` : '📅 No deadline';\n        msg += `${i + 1}. ${badge} **${t.task}** (\\`${t.task_id}\\`)\\n`;\n        msg += `   • Deadline: ${dl} | Status: \\`${t.status}\\`\\n\\n`;\n      });\n      msg += `*Mark complete with: \\`/done <task_id>\\`.*`;\n    }\n  }\n\n  results.push({\n    json: {\n      chat_id: chatId,\n      message_text: msg\n    }\n  });\n\n  return results;\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = {\n    processFormatTasksFiltered\n  };\n}\n\nif (typeof $input !== 'undefined') {\n  let allTasks = [];\n  try {\n    if (typeof $ !== 'undefined') {\n      allTasks = $('Read ActionItems Tab').all().map(i => i.json);\n    }\n  } catch (e) {\n    allTasks = [];\n  }\n\n  let triggerData = {};\n  try {\n    if (typeof $ !== 'undefined') {\n      triggerData = $('Parse Update Action').first()?.json || $('Execute Workflow Trigger').first()?.json || {};\n    }\n  } catch (e) {\n    triggerData = {};\n  }\n\n  return processFormatTasksFiltered($input.all(), allTasks, triggerData);\n}\n"
+      },
+      "id": "code-format-board-005",
+      "name": "Format Tasks Board",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        980,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.message_text }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "tg-send-board-006",
+      "name": "Send Active Tasks Board",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1200,
+        100
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_clarify_reply }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-is-clarify-reply-007",
+      "name": "Is Clarification Reply?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        540,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/{{ $env.GEMINI_MODEL || 'gemini-3.8-flash' }}:generateContent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "x-goog-api-key",
+              "value": "={{ $env.GEMINI_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"role\": \"user\",\n      \"parts\": [\n        {\n          \"text\": \"Reference Date (Asia/Kolkata): \" + $json.reference_date + \" (\" + $json.weekday + \")\\nSender: \" + $json.user_handle + \"\\nClarification Target: \" + $json.reply_to_text + \"\\n\\nUser Free-Text Reply:\\n\\\"\" + $json.reply_text + \"\\\"\"\n        }\n      ]\n    }\n  ],\n  \"systemInstruction\": {\n    \"parts\": [\n      {\n        \"text\": \"You are EDITH, the Chief-of-Staff AI for this student engineering team.\\nYour task is to parse a team member's free-text reply to a task clarification prompt and extract the intended owner and target deadline.\\n\\nRules:\\n1. First-person commitments (\\\"I'll do it\\\", \\\"assign to me\\\", \\\"mine\\\") => set owner to the Sender's username.\\n2. Third-person assignments (\\\"Priya will handle this\\\", \\\"assign to @rahul\\\") => set owner to that handle/name.\\n3. If no owner mentioned => owner null.\\n4. Resolve all relative dates (e.g. \\\"tomorrow\\\", \\\"by next Thursday\\\", \\\"Friday\\\") anchored to Reference Date in Asia/Kolkata into strict YYYY-MM-DD. If ambiguous or not mentioned => deadline_iso null.\\n5. Score confidence 0.0 to 1.0 (>= 0.60 for clear declarations, < 0.60 for chatter or ambiguity).\\n6. Output JSON only matching schema.\"\n      }\n    ]\n  },\n  \"generationConfig\": {\n    \"temperature\": 0.1,\n    \"responseMimeType\": \"application/json\",\n    \"responseSchema\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"owner\": { \"type\": [\"string\", \"null\"] },\n        \"deadline_iso\": { \"type\": [\"string\", \"null\"] },\n        \"confidence\": { \"type\": \"number\" }\n      },\n      \"required\": [\"owner\", \"deadline_iso\", \"confidence\"]\n    }\n  }\n}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "http-gemini-clarify-008",
+      "name": "Call Gemini Clarify Parser",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        760,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Validate Clarification Response (code-nodes/validate_clarify_response.js)\n * \n * Validates Gemini's structured extraction from free-text clarification replies:\n * - Checks confidence threshold (>= 0.60)\n * - Verifies that either owner or deadline_iso was extracted\n * - Resolves owner handle\n * - Emits valid update payload or polite re-prompt if ambiguous\n */\n\nfunction processValidateClarify(items, parsedActionContext = {}) {\n  const results = [];\n\n  for (const item of items) {\n    const json = item.json;\n\n    // Handle extraction from Gemini response\n    let extracted = null;\n    try {\n      if (typeof json === 'object' && json.confidence !== undefined) {\n        extracted = json;\n      } else if (json.candidates?.[0]?.content?.parts?.[0]?.text) {\n        extracted = JSON.parse(json.candidates[0].content.parts[0].text);\n      } else if (json.text) {\n        extracted = JSON.parse(json.text);\n      } else {\n        extracted = json;\n      }\n    } catch (e) {\n      extracted = { owner: null, deadline_iso: null, confidence: 0 };\n    }\n\n    const taskId = parsedActionContext.task_id || json.task_id || '';\n    const chatId = parsedActionContext.chat_id || json.chat_id || '';\n    const sender = parsedActionContext.user_handle || '';\n\n    const confidence = typeof extracted?.confidence === 'number' ? extracted.confidence : 0;\n    const rawOwner = (extracted?.owner || '').trim();\n    const rawDeadline = (extracted?.deadline_iso || '').trim();\n\n    // Check validity: confidence >= 0.60 and at least one entity extracted\n    const hasOwner = Boolean(rawOwner && rawOwner.toLowerCase() !== 'null');\n    const hasDeadline = Boolean(rawDeadline && /^\\d{4}-\\d{2}-\\d{2}$/.test(rawDeadline));\n    const isValid = confidence >= 0.60 && (hasOwner || hasDeadline);\n\n    if (!isValid) {\n      results.push({\n        json: {\n          is_valid: false,\n          task_id: taskId,\n          chat_id: chatId,\n          confidence: confidence,\n          retry_message: `⚠️ EDITH could not determine an assignee or deadline from your response.\\n\\nPlease reply directly with a name (e.g. @username) or a target date (e.g. 2026-11-13).`\n        }\n      });\n    } else {\n      let finalOwner = null;\n      if (hasOwner) {\n        finalOwner = rawOwner.startsWith('@') ? rawOwner : (rawOwner.toLowerCase() === 'me' ? sender : rawOwner);\n      }\n\n      results.push({\n        json: {\n          is_valid: true,\n          action_type: 'clarify_reply_resolved',\n          task_id: taskId,\n          chat_id: chatId,\n          new_owner: finalOwner,\n          new_deadline: hasDeadline ? rawDeadline : null,\n          confidence: confidence\n        }\n      });\n    }\n  }\n\n  return results;\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = {\n    processValidateClarify\n  };\n}\n\nif (typeof $input !== 'undefined') {\n  let actionContext = {};\n  try {\n    actionContext = $('Parse Update Action').first()?.json || {};\n  } catch (e) {\n    actionContext = {};\n  }\n  return processValidateClarify($input.all(), actionContext);\n}\n"
+      },
+      "id": "code-validate-clarify-009",
+      "name": "Validate Clarification Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        980,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_valid }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-clarify-valid-010",
+      "name": "Is Clarification Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.retry_message }}"
+      },
+      "id": "tg-send-clarify-retry-011",
+      "name": "Send Clarification Retry Prompt",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1420,
+        260
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/answerCallbackQuery",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"callback_query_id\": $json.callback_query_id,\n  \"text\": \"EDITH: Updating task...\"\n}",
+        "options": {}
+      },
+      "id": "http-answer-callback-012",
+      "name": "Answer Telegram Callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        760,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "ActionItems",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "gsheets-read-items-013",
+      "name": "Read ActionItems (Update)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1440,
+        480
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * EDITH Task Update Row Preparer (code-nodes/prepare_task_update_row.js)\n * \n * Matches target task in ActionItems tab, applies updates,\n * recomputes status, updates timestamp, and crafts the confirmation message.\n */\n\nfunction processPrepareUpdateRow(items, actionData = {}, existingTasks = []) {\n  const results = [];\n  const targetTaskId = (actionData.task_id || '').toUpperCase();\n  const chatId = actionData.chat_id;\n\n  if (actionData.skip_action) {\n    results.push({\n      json: {\n        task_found: true,\n        skip_action: true,\n        chat_id: chatId,\n        task_id: targetTaskId,\n        confirmation_message: `📌 Clarification skipped for task \\`${targetTaskId}\\`. No changes made.`\n      }\n    });\n    return results;\n  }\n\n  const targetRow = existingTasks.find(t => String(t.task_id || '').toUpperCase() === targetTaskId);\n\n  if (!targetRow) {\n    results.push({\n      json: {\n        task_found: false,\n        skip_action: false,\n        chat_id: chatId,\n        task_id: targetTaskId,\n        error_message: `⚠️ Task \\`${targetTaskId || 'UNKNOWN'}\\` not found in EDITH Database.\\n\\nPlease check the task ID and try again (e.g., \\`/update TSK-1001 completed\\`).`\n      }\n    });\n  } else {\n    const nowStr = new Date(Date.now() + 330 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19);\n\n    let updatedOwner = targetRow.owner || '';\n    let updatedOwnerTg = targetRow.owner_telegram_id || '';\n    let updatedDeadline = targetRow.deadline || '';\n    let updatedDeadlinePhrase = targetRow.deadline_phrase || '';\n    let updatedStatus = targetRow.status || 'assigned';\n\n    // Apply Owner updates\n    if (actionData.new_owner) {\n      updatedOwner = actionData.new_owner.replace(/^@/, '');\n      updatedOwnerTg = actionData.new_owner.startsWith('@') ? actionData.new_owner : `@${actionData.new_owner}`;\n    }\n\n    // Apply Deadline updates\n    if (actionData.new_deadline) {\n      updatedDeadline = actionData.new_deadline;\n      updatedDeadlinePhrase = 'Set via Telegram';\n    }\n\n    // Apply Status updates\n    if (actionData.new_status) {\n      updatedStatus = actionData.new_status;\n    } else {\n      // Recompute status if owner or deadline changed\n      if (!updatedOwner) {\n        updatedStatus = 'unassigned';\n      } else if (!updatedDeadline) {\n        updatedStatus = 'missing_deadline';\n      } else if (updatedStatus === 'unassigned' || updatedStatus === 'missing_deadline' || updatedStatus === 'ambiguous_deadline' || updatedStatus === 'conflicting_deadline') {\n        updatedStatus = 'assigned';\n      }\n    }\n\n    const updatedRecord = {\n      ...targetRow,\n      owner: updatedOwner,\n      owner_telegram_id: updatedOwnerTg,\n      deadline: updatedDeadline,\n      deadline_phrase: updatedDeadlinePhrase,\n      status: updatedStatus,\n      updated_at: nowStr\n    };\n\n    const confirmationMsg = `✅ **Task Updated: ${targetTaskId}**\\n\\n` +\n      `• **Task:** ${targetRow.task}\\n` +\n      `• **Status:** \\`${updatedStatus}\\`\\n` +\n      `• **Assignee:** ${updatedOwnerTg || 'Unassigned'}\\n` +\n      `• **Deadline:** ${updatedDeadline ? `📅 ${updatedDeadline}` : 'No deadline'}\\n\\n` +\n      `*Changes synced to EDITH Database.*`;\n\n    results.push({\n      json: {\n        task_found: true,\n        skip_action: false,\n        chat_id: chatId,\n        task_id: targetTaskId,\n        confirmation_message: confirmationMsg,\n        updated_row: updatedRecord\n      }\n    });\n  }\n\n  return results;\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = {\n    processPrepareUpdateRow\n  };\n}\n\nif (typeof $input !== 'undefined') {\n  let actionData = {};\n  try {\n    const clarifyResolved = $('Validate Clarification Response').first()?.json;\n    if (clarifyResolved && clarifyResolved.is_valid) {\n      actionData = clarifyResolved;\n    }\n  } catch (e) {}\n\n  if (!actionData.task_id) {\n    try {\n      actionData = $('Parse Update Action').first()?.json || {};\n    } catch (e) {}\n  }\n\n  let existingTasks = [];\n  try {\n    existingTasks = $('Read ActionItems Tab').all().map(i => i.json);\n  } catch (e) {\n    existingTasks = [];\n  }\n\n  return processPrepareUpdateRow($input.all(), actionData, existingTasks);\n}\n"
+      },
+      "id": "code-prepare-update-014",
+      "name": "Prepare Task Update Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1660,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.task_found }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-task-found-015",
+      "name": "Task Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1880,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.skip_action }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-skip-action-016",
+      "name": "Is Skip Action?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        2100,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "ActionItems",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": [
+            "task_id"
+          ],
+          "value": {
+            "task_id": "={{ $json.updated_row.task_id }}",
+            "meeting_id": "={{ $json.updated_row.meeting_id }}",
+            "task": "={{ $json.updated_row.task }}",
+            "owner": "={{ $json.updated_row.owner }}",
+            "owner_telegram_id": "={{ $json.updated_row.owner_telegram_id }}",
+            "deadline": "={{ $json.updated_row.deadline }}",
+            "deadline_phrase": "={{ $json.updated_row.deadline_phrase }}",
+            "status": "={{ $json.updated_row.status }}",
+            "source_quote": "={{ $json.updated_row.source_quote }}",
+            "last_reminder_stage": "={{ $json.updated_row.last_reminder_stage }}",
+            "created_at": "={{ $json.updated_row.created_at }}",
+            "updated_at": "={{ $json.updated_row.updated_at }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "gsheets-update-task-017",
+      "name": "Update ActionItems Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2320,
+        480
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_creds",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.confirmation_message }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "tg-send-update-ack-018",
+      "name": "Send Update Confirmation",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2540,
+        480
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.error_message }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "tg-send-not-found-019",
+      "name": "Send Task Not Found Notice",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2100,
+        600
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_bot_creds",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse Update Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Update Action": {
+      "main": [
+        [
+          {
+            "node": "Is /tasks Query?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is /tasks Query?": {
+      "main": [
+        [
+          {
+            "node": "Read ActionItems (Board)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Clarification Reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read ActionItems (Board)": {
+      "main": [
+        [
+          {
+            "node": "Format Tasks Board",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Tasks Board": {
+      "main": [
+        [
+          {
+            "node": "Send Active Tasks Board",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Clarification Reply?": {
+      "main": [
+        [
+          {
+            "node": "Call Gemini Clarify Parser",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Answer Telegram Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Gemini Clarify Parser": {
+      "main": [
+        [
+          {
+            "node": "Validate Clarification Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Clarification Response": {
+      "main": [
+        [
+          {
+            "node": "Is Clarification Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Clarification Valid?": {
+      "main": [
+        [
+          {
+            "node": "Read ActionItems (Update)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Clarification Retry Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Telegram Callback": {
+      "main": [
+        [
+          {
+            "node": "Read ActionItems (Update)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read ActionItems (Update)": {
+      "main": [
+        [
+          {
+            "node": "Prepare Task Update Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Task Update Row": {
+      "main": [
+        [
+          {
+            "node": "Task Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Task Found?": {
+      "main": [
+        [
+          {
+            "node": "Is Skip Action?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Task Not Found Notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Skip Action?": {
+      "main": [
+        [
+          {
+            "node": "Send Update Confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update ActionItems Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update ActionItems Row": {
+      "main": [
+        [
+          {
+            "node": "Send Update Confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

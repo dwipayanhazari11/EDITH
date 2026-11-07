@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EDITHClarifyResponse",
+  "type": "object",
+  "properties": {
+    "owner": {
+      "type": ["string", "null"],
+      "description": "The team member assigned or taking ownership (name or @username), or null if not specified."
+    },
+    "deadline_iso": {
+      "type": ["string", "null"],
+      "description": "The resolved target deadline in YYYY-MM-DD format, anchored to the provided reference date in Asia/Kolkata, or null if not specified."
+    },
+    "confidence": {
+      "type": "number",
+      "description": "Confidence score between 0.0 and 1.0 representing how clearly the user stated the owner or deadline."
+    }
+  },
+  "required": [
+    "owner",
+    "deadline_iso",
+    "confidence"
+  ],
+  "additionalProperties": false
+}
